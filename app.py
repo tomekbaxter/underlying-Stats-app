@@ -466,8 +466,8 @@ def display_mutual_opponents_section(home_team: str, away_team: str, league_name
         # Display: NO decimal places for all numeric columns
         .format(
             {
-                "ATT": "{:.0f}",
-                "DEF": "{:.0f}",
+                "ATT": "{:.2f}",
+                "DEF": "{:.2f}",
                 "Home SOF": "{:.0f}",
                 "Home SOA": "{:.0f}",
                 "Away SOF": "{:.0f}",
