@@ -125,12 +125,29 @@ def _build_db_url_from_txt(path: str) -> str:
     return f"postgresql+psycopg2://{user_q}:{pw_q}@{host}:{port}/{db}"
 
 def _get_db_url() -> str:
-    url = _build_db_url_from_txt(SECRETS_TXT_PATH)
-    if url:
-        return url
-    st.error("Could not build DB URL from Secrets.txt.")
-    st.stop()
-    return ""
+    # 1) Streamlit Cloud secrets (preferred)
+    try:
+        if "SUPABASE_DB_URL" in st.secrets and str(st.secrets["SUPABASE_DB_URL"]).strip():
+            return str(st.secrets["SUPABASE_DB_URL"]).strip()
+
+        needed = ["SUPABASE_HOST", "SUPABASE_PORT", "SUPABASE_DB", "SUPABASE_USER", "SUPABASE_PASS"]
+        if all(k in st.secrets and str(st.secrets[k]).strip() for k in needed):
+            host = str(st.secrets["SUPABASE_HOST"]).strip()
+            port = str(st.secrets["SUPABASE_PORT"]).strip()
+            db = str(st.secrets["SUPABASE_DB"]).strip()
+            user = str(st.secrets["SUPABASE_USER"]).strip()
+            pw = str(st.secrets["SUPABASE_PASS"]).strip()
+
+            user_q = quote_plus(user)
+            pw_q = quote_plus(pw)
+            return f"postgresql+psycopg2://{user_q}:{pw_q}@{host}:{port}/{db}"
+    except Exception:
+        # If st.secrets isn't available for any reason, fall back to file below
+        pass
+
+    # 2) Local dev fallback (your Windows Secrets.txt)
+    return _build_db_url_from_txt(SECRETS_TXT_PATH)
+
 
 @st.cache_resource
 def get_engine():
