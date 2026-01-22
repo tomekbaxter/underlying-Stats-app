@@ -671,8 +671,8 @@ def display_recent_form_section(home_team: str, away_team: str, league_name: str
                     "SOA": "{:.0f}",
                     "SF": "{:.0f}",
                     "SA": "{:.0f}",
-                    "Opp ATT": "{:.0f}",
-                    "Opp DEF": "{:.0f}",
+                    "Opp ATT": "{:.2f}",
+                    "Opp DEF": "{:.2f}",
                 },
                 na_rep="N/A",
             )
