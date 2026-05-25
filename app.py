@@ -99,6 +99,24 @@ st.markdown(
 TZ = ZoneInfo("Europe/London")
 
 # ============================================================
+# PERFORMANCE / DISK IO SETTINGS
+# ============================================================
+# Keep the selector small. This is the biggest Supabase read reduction.
+FIXTURE_LOOKBACK_DAYS = 2
+FIXTURE_LOOKAHEAD_DAYS = 14
+
+# Cache policy:
+# - Engine/resource cache is kept.
+# - Fixture list has a short TTL because odds update frequently.
+# - Selected fixture has a very short TTL so odds stay fresh.
+# - Historical/reference data is cached longer because it changes slowly.
+CACHE_TTL_FIXTURE_LIST = 60
+CACHE_TTL_SELECTED_FIXTURE = 30
+CACHE_TTL_REFERENCE = 1800
+CACHE_TTL_HISTORICAL = 3600
+CACHE_TTL_HEALTHCHECK = 300
+
+# ============================================================
 # SUPABASE / POSTGRES CONNECTION
 # ============================================================
 
@@ -195,10 +213,12 @@ def get_engine():
 ENGINE = get_engine()
 
 
-def db_healthcheck() -> None:
+@st.cache_data(ttl=CACHE_TTL_HEALTHCHECK, show_spinner=False)
+def db_healthcheck() -> bool:
     try:
         with ENGINE.connect() as conn:
             conn.execute(text("SELECT 1"))
+        return True
     except Exception as e:
         st.error(f"Database connection failed: {e}")
         st.stop()
@@ -297,8 +317,21 @@ def gradient_background(value, avg, positive=True):
 # DATA HELPERS
 # ============================================================
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_FIXTURE_LIST, show_spinner=False)
 def load_fixtures_with_odds() -> pd.DataFrame:
+    """
+    Lightweight selector query.
+
+    The original app loaded every fixture with odds. For Supabase Nano this is
+    wasteful because every rerun has to scan/order far more rows than the UI
+    needs. This only loads a practical working window for the dropdowns.
+    EventID search still works outside this window because fetch_fixture_row()
+    queries the selected EventID directly.
+    """
+    today = dt.datetime.now(TZ).date()
+    date_from = today - dt.timedelta(days=FIXTURE_LOOKBACK_DAYS)
+    date_to = today + dt.timedelta(days=FIXTURE_LOOKAHEAD_DAYS)
+
     sql = """
         SELECT
             eventid,
@@ -311,11 +344,20 @@ def load_fixtures_with_odds() -> pd.DataFrame:
             draw AS drawodds,
             away AS awayodds
         FROM fixtures
-        WHERE home IS NOT NULL AND away IS NOT NULL
-          AND home > 0 AND away > 0
+        WHERE date >= :date_from
+          AND date <= :date_to
+          AND home IS NOT NULL
+          AND away IS NOT NULL
+          AND home > 0
+          AND away > 0
         ORDER BY date DESC, league, hometeam
     """
-    df = read_sql_df(sql)
+    df = read_sql_df(sql, params={"date_from": date_from, "date_to": date_to})
+
+    if df.empty:
+        df["datestr"] = []
+        df["fixturename"] = []
+        return df
 
     for c in ["homeodds", "drawodds", "awayodds"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -329,7 +371,7 @@ def load_fixtures_with_odds() -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=120)
+@st.cache_data(ttl=CACHE_TTL_SELECTED_FIXTURE, show_spinner=False)
 def fetch_fixture_row(event_id: str) -> dict | None:
     sql = """
         SELECT
@@ -350,7 +392,7 @@ def fetch_fixture_row(event_id: str) -> dict | None:
     return read_sql_one(sql, params={"eventid": ev})
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_REFERENCE, show_spinner=False)
 def get_team_stats(team_name: str) -> dict:
     sql = """
         SELECT
@@ -395,7 +437,7 @@ def get_team_stats(team_name: str) -> dict:
     }
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_REFERENCE, show_spinner=False)
 def get_team_att_def(team_name: str) -> dict:
     sql = """
         SELECT
@@ -416,7 +458,7 @@ def get_team_att_def(team_name: str) -> dict:
     }
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_HISTORICAL, show_spinner=False)
 def get_latest_head_to_head_row(home_team: str, away_team: str) -> dict | None:
     sql = """
         SELECT
@@ -450,7 +492,7 @@ def get_latest_head_to_head_row(home_team: str, away_team: str) -> dict | None:
     )
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_HISTORICAL, show_spinner=False)
 def get_opponents_past_3_months(team_name: str) -> set:
     since = (dt.datetime.now(TZ) - dt.timedelta(days=100)).date()
 
@@ -473,7 +515,7 @@ def get_opponents_past_3_months(team_name: str) -> set:
     return opponents
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_HISTORICAL, show_spinner=False)
 def get_match_data_extended(team_name: str, opponent: str) -> dict:
     sql = """
         SELECT
@@ -511,7 +553,7 @@ def get_match_data_extended(team_name: str, opponent: str) -> dict:
     }
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_HISTORICAL, show_spinner=False)
 def get_league_wide_baselines(league_name: str) -> dict:
     since = (dt.datetime.now(TZ) - dt.timedelta(days=270)).date()
 
@@ -629,7 +671,7 @@ def display_mutual_opponents_section(home_team: str, away_team: str, league_name
     render_styled_table(styled)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_HISTORICAL, show_spinner=False)
 def get_league_recent_baselines(league_name: str) -> dict:
     since = (dt.datetime.now(TZ) - dt.timedelta(days=270)).date()
 
@@ -676,7 +718,7 @@ def get_league_recent_baselines(league_name: str) -> dict:
     }
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_REFERENCE, show_spinner=False)
 def get_opponent_att_def(opponent_name: str) -> tuple[float | None, float | None]:
     sql = """
         SELECT
@@ -694,7 +736,7 @@ def get_opponent_att_def(opponent_name: str) -> tuple[float | None, float | None
     return safe_float(row.get("att"), np.nan), safe_float(row.get("def"), np.nan)
 
 
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=CACHE_TTL_HISTORICAL, show_spinner=False)
 def get_recent_form(team_name: str) -> list[dict]:
     since = (dt.datetime.now(TZ) - dt.timedelta(days=270)).date()
 
@@ -1015,6 +1057,10 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
+
+if st.button("Refresh data", help="Clears Streamlit data cache and reruns the app."):
+    st.cache_data.clear()
+    st.rerun()
 
 st.subheader("Search Fixture")
 st.markdown(
