@@ -436,10 +436,10 @@ def display_mutual_opponents_section(home_team: str, away_team: str, league_name
             },
             na_rep="N/A",
         )
-        lambda x: gradient_background(x, att_avg, positive=True), subset=["ATT"])
-        lambda x: gradient_background(x, def_avg, positive=False), subset=["DEF"])
-        lambda x: gradient_background(x, sof_avg, positive=True), subset=sof_cols)
-        lambda x: gradient_background(x, soa_avg, positive=False), subset=soa_cols)
+        .map(lambda x: gradient_background(x, att_avg, positive=True), subset=["ATT"])
+        .map(lambda x: gradient_background(x, def_avg, positive=False), subset=["DEF"])
+        .map(lambda x: gradient_background(x, sof_avg, positive=True), subset=sof_cols)
+        .map(lambda x: gradient_background(x, soa_avg, positive=False), subset=soa_cols)
         .set_table_styles(
             [
                 {
@@ -639,10 +639,10 @@ def display_recent_form_section(home_team: str, away_team: str, league_name: str
                 },
                 na_rep="N/A",
             )
-            lambda x: gradient_background(x, avg_values["Opp ATT"], positive=True), subset=["Opp ATT"])
-            lambda x: gradient_background(x, avg_values["Opp DEF"], positive=False), subset=["Opp DEF"])
-            lambda x: gradient_background(x, avg_values["GF"], positive=True), subset=["GF"])
-            lambda x: gradient_background(x, avg_values["GA"], positive=False), subset=["GA"])
+            .map(lambda x: gradient_background(x, avg_values["Opp ATT"], positive=True), subset=["Opp ATT"])
+            .map(lambda x: gradient_background(x, avg_values["Opp DEF"], positive=False), subset=["Opp DEF"])
+            .map(lambda x: gradient_background(x, avg_values["GF"], positive=True), subset=["GF"])
+            .map(lambda x: gradient_background(x, avg_values["GA"], positive=False), subset=["GA"])
             .map(lambda x: gradient_background(x, avg_values["SOF"], positive=True), subset=["SOF"])
             .map(lambda x: gradient_background(x, avg_values["SOA"], positive=False), subset=["SOA"])
             .map(lambda x: gradient_background(x, avg_values["SF"], positive=True), subset=["SF"])
