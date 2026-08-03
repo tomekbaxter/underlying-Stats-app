@@ -359,8 +359,31 @@ def recent_form(matches: pd.DataFrame, team: str,
                "GF", "SOF", "SF", "GA", "SOA", "SA"]]
 
 
+MUTUAL_WINDOWS = {
+    "Last 2 weeks": 14,
+    "Last month": 30,
+    "Last 2 months": 60,
+    "Last 3 months": 90,
+}
+
+
 def mutual_opponents(matches: pd.DataFrame, home: str, away: str,
-                     teams: pd.DataFrame) -> pd.DataFrame:
+                     teams: pd.DataFrame, days: int = 90) -> pd.DataFrame:
+    """
+    Shared opponents within the last `days`. The caller already holds a
+    270-day window, so narrowing happens in memory — changing the timeframe
+    costs no extra query.
+    """
+    if matches.empty:
+        return pd.DataFrame()
+
+    if days:
+        cutoff = pd.Timestamp(dt.datetime.now(TZ).date()
+                              - dt.timedelta(days=days))
+        matches = matches[matches["date"] >= cutoff]
+        if matches.empty:
+            return pd.DataFrame()
+
     h = perspective(matches, home)
     a = perspective(matches, away)
     if h.empty or a.empty:
@@ -1082,15 +1105,53 @@ with tab_cmp:
     st.caption("Dotted line marks the league average for each stat.")
 
 with tab_mutual:
-    mutual = mutual_opponents(matches, home_team, away_team, teams_df)
+    col_window, col_note = st.columns([1, 3])
+    window_label = col_window.selectbox(
+        "Timeframe", list(MUTUAL_WINDOWS.keys()),
+        index=len(MUTUAL_WINDOWS) - 1,
+        key="mutual_window", label_visibility="collapsed",
+    )
+    window_days = MUTUAL_WINDOWS[window_label]
+
+    mutual = mutual_opponents(matches, home_team, away_team, teams_df,
+                              days=window_days)
+
     if mutual.empty:
-        st.caption("No shared opponents in the last 270 days.")
+        # Point at a window that would actually return something, rather than
+        # leaving the reader to try each one.
+        wider = [
+            label for label, days in MUTUAL_WINDOWS.items()
+            if days > window_days
+            and not mutual_opponents(matches, home_team, away_team,
+                                     teams_df, days=days).empty
+        ]
+        if wider:
+            st.caption(
+                f"No shared opponents in the {window_label.lower()}. "
+                f"Try {wider[0].lower()}."
+            )
+        else:
+            st.caption(
+                f"No shared opponents in the {window_label.lower()}. "
+                "These two teams have no recent opponents in common."
+            )
     else:
         diff_scale = signed_scale(mutual["Diff"])
         component_scale = signed_scale(
             pd.concat([mutual["H Diff"], mutual["A Diff"]], ignore_index=True)
         )
-
+        col_note.markdown(
+            f'<div style="font-size:13px;color:{TEXT_3};padding-top:8px;">'
+            f"{len(mutual)} shared opponent"
+            f"{'s' if len(mutual) != 1 else ''} in the "
+            f"{window_label.lower()}</div>",
+            unsafe_allow_html=True,
+        )
+        st.caption(
+            f"H Diff and A Diff are each side's shots on target for minus "
+            f"against, versus that same opponent. Diff is H Diff − A Diff: "
+            f"positive favours {home_team}, negative favours {away_team}."
+        )
         render_table(
             mutual,
             {**base, "ATT": base.get("Opp ATT"), "DEF": base.get("Opp DEF"),
