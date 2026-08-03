@@ -378,12 +378,30 @@ def mutual_opponents(matches: pd.DataFrame, home: str, away: str,
         "A when": merged["date_a"].map(relative_day),
         "_sort": merged["date_h"],
     })
-    out["Diff"] = (pd.to_numeric(out["H SOF"], errors="coerce")
-                   - pd.to_numeric(out["A SOF"], errors="coerce"))
+
+ # Each side's own shots-on-target differential against this shared
+    # opponent, then the difference between those two differentials:
+    #   (A SOFor - A SOAgainst) - (B SOFor - B SOAgainst)
+    # A comparison of raw shots-on-target for would ignore what each side
+    # conceded to the same opponent, which is half the signal.
+    h_sof = pd.to_numeric(out["H SOF"], errors="coerce")
+    h_soa = pd.to_numeric(out["H SOA"], errors="coerce")
+    a_sof = pd.to_numeric(out["A SOF"], errors="coerce")
+    a_soa = pd.to_numeric(out["A SOA"], errors="coerce")
+ 
+    out["H Diff"] = h_sof - h_soa
+    out["A Diff"] = a_sof - a_soa
+    out["Diff"] = out["H Diff"] - out["A Diff"]
+ 
+    out = out[["Opponent", "ATT", "DEF",
+               "H when", "H SOF", "H SOA", "H Diff",
+               "A when", "A SOF", "A SOA", "A Diff",
+               "Diff", "_sort"]]
+ 
     return (out.sort_values("_sort", ascending=False)
                .drop(columns="_sort")
                .reset_index(drop=True))
-
+ 
 
 def head_to_head(matches_all: pd.DataFrame, home: str, away: str,
                  limit: int = 5) -> pd.DataFrame:
