@@ -1090,12 +1090,7 @@ with tab_mutual:
         component_scale = signed_scale(
             pd.concat([mutual["H Diff"], mutual["A Diff"]], ignore_index=True)
         )
-        st.caption(
-            f"{len(mutual)} shared opponents. H Diff and A Diff are each "
-            f"side's shots on target for minus against, versus that same "
-            f"opponent. Diff is H Diff − A Diff: positive favours "
-            f"{home_team}, negative favours {away_team}."
-        )
+
         render_table(
             mutual,
             {**base, "ATT": base.get("Opp ATT"), "DEF": base.get("Opp DEF"),
