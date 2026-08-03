@@ -828,7 +828,7 @@ def _on_eventid():
 # in the database.
 date_options = sorted(fixtures_df["datestr"].unique(), reverse=True)
 
-c_event, c_date, c_league, c_fixture = st.columns([1, 1, 1, 3])
+c_event, c_date, c_league, c_fixture = st.columns([1, 1, 3, 3])
 
 c_event.text_input("EventID", key="eventid_input", max_chars=12,
                    placeholder="EventID", on_change=_on_eventid,
