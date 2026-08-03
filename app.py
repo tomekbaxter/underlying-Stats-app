@@ -146,8 +146,15 @@ def get_engine():
         f"@{host}:{port}/{db}?sslmode=require",
         pool_pre_ping=True,
         pool_recycle=300,
-        pool_size=1,
-        max_overflow=2,
+        # The engine is cached once per container and shared by every visitor.
+        # Queries are cached for 15 minutes, so most page views touch no
+        # connection at all; this headroom covers simultaneous cold loads.
+        pool_size=3,
+        max_overflow=4,
+        # Fail fast rather than leaving a visitor on a spinner if the pool
+        # is saturated.
+        pool_timeout=10,
+        connect_args={"connect_timeout": 10},
         future=True,
     )
 
@@ -167,9 +174,13 @@ def read_sql_df(sql: str, params: dict | None = None,
             return pd.read_sql(text(sql), conn, params=params or {})
     except Exception as exc:
         if critical:
-            st.error(f"Database unavailable: {exc}")
+            st.error(
+                "Couldn't load match data right now. This is usually "
+                "temporary — try refreshing in a moment."
+            )
+            st.caption(f"Details: {type(exc).__name__}")
             st.stop()
-        st.warning("Some data could not be loaded.")
+        st.warning("Some data couldn't be loaded for this match.")
         return pd.DataFrame()
 
 
@@ -374,12 +385,12 @@ def mutual_opponents(matches: pd.DataFrame, home: str, away: str,
         "DEF": merged["Opponent"].map(teams["DEF"] if not teams.empty else {}),
         "H when": merged["date_h"].map(relative_day),
         "H SOF": merged["SOF_h"], "H SOA": merged["SOA_h"],
-        "A SOF": merged["SOF_a"], "A SOA": merged["SOA_a"],
         "A when": merged["date_a"].map(relative_day),
+        "A SOF": merged["SOF_a"], "A SOA": merged["SOA_a"],
         "_sort": merged["date_h"],
     })
 
- # Each side's own shots-on-target differential against this shared
+    # Each side's own shots-on-target differential against this shared
     # opponent, then the difference between those two differentials:
     #   (A SOFor - A SOAgainst) - (B SOFor - B SOAgainst)
     # A comparison of raw shots-on-target for would ignore what each side
@@ -388,20 +399,20 @@ def mutual_opponents(matches: pd.DataFrame, home: str, away: str,
     h_soa = pd.to_numeric(out["H SOA"], errors="coerce")
     a_sof = pd.to_numeric(out["A SOF"], errors="coerce")
     a_soa = pd.to_numeric(out["A SOA"], errors="coerce")
- 
+
     out["H Diff"] = h_sof - h_soa
     out["A Diff"] = a_sof - a_soa
     out["Diff"] = out["H Diff"] - out["A Diff"]
- 
+
     out = out[["Opponent", "ATT", "DEF",
                "H when", "H SOF", "H SOA", "H Diff",
                "A when", "A SOF", "A SOA", "A Diff",
                "Diff", "_sort"]]
- 
+
     return (out.sort_values("_sort", ascending=False)
                .drop(columns="_sort")
                .reset_index(drop=True))
- 
+
 
 def head_to_head(matches_all: pd.DataFrame, home: str, away: str,
                  limit: int = 5) -> pd.DataFrame:
@@ -438,33 +449,84 @@ def cell_style(value, avg, higher_is_better=True) -> str:
         value = float(value)
         if avg in (None, 0) or pd.isna(value) or pd.isna(avg):
             return f"background-color:{SURFACE_2};color:{TEXT_1};"
-
-        norm = (value - avg) / avg
-        intensity = float(np.tanh(abs(norm) * 1.4))
-        good = norm > 0 if higher_is_better else norm < 0
-        target = GOOD if good else BAD
-
-        rgb = np.clip(CELL_BASE + (target - CELL_BASE) * intensity,
-                      0, 255).astype(int)
-        lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
-        fg = PAGE_BG if lum > 140 else TEXT_1
-        return f"background-color:rgb({rgb[0]},{rgb[1]},{rgb[2]});color:{fg};"
+        return _tint((value - avg) / abs(avg), higher_is_better)
     except Exception:
         return f"background-color:{SURFACE_2};color:{TEXT_1};"
 
 
+def signed_style(value, scale) -> str:
+    """
+    For differentials, where zero is neutral rather than a baseline ratio.
+    Large positive shades green, large negative red. Measuring these against
+    a baseline would paint a neutral zero a strong colour.
+    """
+    try:
+        value = float(value)
+        if pd.isna(value) or not scale:
+            return f"background-color:{SURFACE_2};color:{TEXT_1};"
+        return _tint(value / scale, True)
+    except (TypeError, ValueError):
+        return f"background-color:{SURFACE_2};color:{TEXT_1};"
+
+
+def _tint(norm: float, higher_is_better: bool) -> str:
+    intensity = float(np.tanh(abs(norm) * 1.4))
+    good = norm > 0 if higher_is_better else norm < 0
+    rgb = np.clip(CELL_BASE + ((GOOD if good else BAD) - CELL_BASE)
+                  * intensity, 0, 255).astype(int)
+    lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+    fg = PAGE_BG if lum > 140 else TEXT_1
+    return f"background-color:rgb({rgb[0]},{rgb[1]},{rgb[2]});color:{fg};"
+
+
+def signed_scale(series: pd.Series, floor: float = 4.0) -> float:
+    """
+    Intensity reference for a differential column: the 90th percentile of its
+    absolute values, with a floor so a quiet fixture doesn't make a one-shot
+    difference look dramatic.
+    """
+    values = pd.to_numeric(series, errors="coerce").abs().dropna()
+    values = values[values > 0]
+    if len(values) < 3:
+        return floor
+    return max(floor, float(values.quantile(0.90)))
+
+
+def deviation_marker(value, avg, higher_is_better=True) -> str:
+    """
+    Redundant encoding for the green/red scale. Roughly 8% of men have a
+    red-green colour deficiency, so a public app cannot rely on hue alone.
+    Only marks meaningful deviations, keeping ordinary rows uncluttered.
+    """
+    try:
+        value, avg = float(value), float(avg)
+        if avg == 0 or pd.isna(value) or pd.isna(avg):
+            return ""
+        norm = (value - avg) / avg
+        if abs(norm) < 0.25:
+            return ""
+        good = norm > 0 if higher_is_better else norm < 0
+        return " ▲" if good else " ▼"
+    except (TypeError, ValueError):
+        return ""
+
+
 def render_table(df: pd.DataFrame, baselines: dict,
                  positive: list[str], negative: list[str],
-                 formats: dict | None = None):
+                 formats: dict | None = None,
+                 signed: dict | None = None):
     """
     Hand-rendered HTML so the gradient survives, wrapped for horizontal scroll
     on narrow screens rather than crushing columns.
+
+    `signed` maps column name -> intensity scale for zero-anchored columns.
     """
     if df.empty:
         st.caption("No data available.")
         return
 
     formats = formats or {}
+    signed = signed or {}
     head = "".join(f"<th>{c}</th>" for c in df.columns)
     body = []
 
@@ -483,11 +545,31 @@ def render_table(df: pd.DataFrame, baselines: dict,
             else:
                 text_val = str(val)
 
-            if col in positive or col in negative:
+            if col in signed:
+                style = signed_style(val, signed[col])
+                mark = ""
+                try:
+                    if not pd.isna(val) and abs(float(val)) >= signed[col] / 2:
+                        mark = " ▲" if float(val) > 0 else " ▼"
+                except (TypeError, ValueError):
+                    pass
+                cells.append(
+                    f'<td style="{style}" title="{col}: {text_val}">{text_val}'
+                    f'<span style="font-size:10px;opacity:.75;">{mark}</span></td>'
+                )
+            elif col in positive or col in negative:
                 avg = baselines.get(col)
-                style = cell_style(val, avg, higher_is_better=col in positive)
-                title = f"{col} {text_val} · league {avg:.2f}" if avg else col
-                cells.append(f'<td style="{style}" title="{title}">{text_val}</td>')
+                higher_better = col in positive
+                style = cell_style(val, avg, higher_is_better=higher_better)
+                mark = deviation_marker(val, avg, higher_is_better=higher_better)
+                if avg:
+                    title = (f"{col}: {text_val} · league average {avg:.2f}")
+                else:
+                    title = col
+                cells.append(
+                    f'<td style="{style}" title="{title}">{text_val}'
+                    f'<span style="font-size:10px;opacity:.75;">{mark}</span></td>'
+                )
             else:
                 cells.append(f'<td style="color:{TEXT_2}">{text_val}</td>')
         body.append("<tr>" + "".join(cells) + "</tr>")
@@ -660,6 +742,51 @@ def metric_tile(label: str, value: str, color: str = TEXT_1) -> str:
         f'<div style="font-size:19px;font-weight:500;color:{color};">{value}</div>'
         f"</div>"
     )
+
+
+GLOSSARY = [
+    ("GF / GA", "Goals for / against."),
+    ("SOF / SOA", "Shots on target for / against."),
+    ("SF / SA", "Total shots for / against."),
+    ("AGF / AGA", "Average goals for / against, per game this season."),
+    ("ASOF / ASOA", "Average shots on target for / against, per game."),
+    ("ATT", "Attack rating. Above 1.00 means the team creates more than the "
+            "league average."),
+    ("DEF", "Defence rating. Below 1.00 means the team concedes less than the "
+            "league average."),
+    ("xG", "Expected goals — the goals a team would typically score from the "
+           "chances the model gives them."),
+    ("Expected SoT", "Expected shots on target, from the same model."),
+    ("H Diff / A Diff", "Each side's shots on target for minus against, "
+                        "against that same shared opponent."),
+    ("Diff", "H Diff minus A Diff — how much better the home side performed "
+             "against a common opponent than the away side did. Positive "
+             "favours the home team."),
+    ("SOD diff", "Shots-on-target differential against shared opponents. "
+                 "Positive favours the home side."),
+    ("Form", "Recent performance score. Higher is better."),
+    ("Edge", "Model probability minus the probability implied by the odds, in "
+             "percentage points. Positive means the model rates the outcome "
+             "more likely than the market does."),
+    ("Venue", "H = played at home, A = played away."),
+]
+
+
+def render_help():
+    with st.expander("What do these abbreviations mean?"):
+        st.markdown(
+            f'<div style="font-size:13px;color:{TEXT_2};line-height:1.7;">'
+            + "".join(
+                f'<div><span style="color:{TEXT_1};">{term}</span> — {desc}</div>'
+                for term, desc in GLOSSARY
+            )
+            + f'<div style="margin-top:10px;color:{TEXT_3};">'
+              f"Coloured cells compare a value against that league's average: "
+              f'<span style="color:{GOOD_HEX};">green ▲</span> is better than '
+              f'average, <span style="color:{BAD_HEX};">red ▼</span> is worse. '
+              f"Hover any cell to see the exact league average.</div></div>",
+            unsafe_allow_html=True,
+        )
 
 
 def render_header(row, home_team, away_team, home_stats, away_stats,
@@ -846,6 +973,15 @@ def _on_eventid():
 # in the database.
 date_options = sorted(fixtures_df["datestr"].unique(), reverse=True)
 
+# A first-time visitor arriving from a link should land on something. Default
+# to the next date that has fixtures, falling back to the most recent past one.
+if "date_select" not in st.session_state:
+    _today = dt.datetime.now(TZ).strftime("%Y-%m-%d")
+    _upcoming = [d for d in date_options if d >= _today]
+    _default = min(_upcoming) if _upcoming else date_options[0]
+    st.session_state.date_select = _default
+    st.session_state.sel_date = _default
+
 c_event, c_date, c_league, c_fixture = st.columns([1, 1, 2, 3])
 
 c_event.text_input("EventID", key="eventid_input", max_chars=12,
@@ -880,7 +1016,12 @@ c_fixture.selectbox("Fixture", [PLACEHOLDER_FIXTURE] + fixtures_list,
 st.caption("Enter an EventID directly, or filter by date → league → fixture.")
 
 if not st.session_state.sel_eventid:
-    st.info("Select a fixture, or enter an EventID.")
+    st.info(
+        "Pick a league and fixture above to see the underlying stats for that "
+        "match — model projections, form against comparable opponents, and how "
+        "the numbers compare to the league average."
+    )
+    render_help()
     st.stop()
 
 try:
@@ -924,12 +1065,13 @@ with st.spinner("Loading match data…"):
 render_header(row, home_team, away_team, home_stats, away_stats,
               league, match_date, kickoff)
 render_edge(row, home_team, away_team)
+render_help()
 
 tab_cmp, tab_mutual, tab_form, tab_h2h = st.tabs(
     ["Comparison", "Mutual opponents", "Recent form", "Head to head"]
 )
 
-POSITIVE = ["GF", "SOF", "SF", "Opp ATT", "ATT", "H SOF", "A SOF", "Diff"]
+POSITIVE = ["GF", "SOF", "SF", "Opp ATT", "ATT", "H SOF", "A SOF"]
 NEGATIVE = ["GA", "SOA", "SA", "Opp DEF", "DEF", "H SOA", "A SOA"]
 
 with tab_cmp:
@@ -944,20 +1086,28 @@ with tab_mutual:
     if mutual.empty:
         st.caption("No shared opponents in the last 270 days.")
     else:
+        diff_scale = signed_scale(mutual["Diff"])
+        component_scale = signed_scale(
+            pd.concat([mutual["H Diff"], mutual["A Diff"]], ignore_index=True)
+        )
         st.caption(
-            f"{len(mutual)} shared opponents · Diff is "
-            f"{home_team} shots on target minus {away_team}, same opponent."
+            f"{len(mutual)} shared opponents. H Diff and A Diff are each "
+            f"side's shots on target for minus against, versus that same "
+            f"opponent. Diff is H Diff − A Diff: positive favours "
+            f"{home_team}, negative favours {away_team}."
         )
         render_table(
             mutual,
             {**base, "ATT": base.get("Opp ATT"), "DEF": base.get("Opp DEF"),
              "H SOF": base.get("SOF"), "A SOF": base.get("SOF"),
-             "H SOA": base.get("SOA"), "A SOA": base.get("SOA"),
-             "Diff": 0.001},
+             "H SOA": base.get("SOA"), "A SOA": base.get("SOA")},
             POSITIVE, NEGATIVE,
             {"ATT": "{:.2f}", "DEF": "{:.2f}", "H SOF": "{:.0f}",
              "H SOA": "{:.0f}", "A SOF": "{:.0f}", "A SOA": "{:.0f}",
-             "Diff": "{:+.0f}"},
+             "H Diff": "{:+.0f}", "A Diff": "{:+.0f}", "Diff": "{:+.0f}"},
+            signed={"H Diff": component_scale,
+                    "A Diff": component_scale,
+                    "Diff": diff_scale},
         )
 
 with tab_form:
