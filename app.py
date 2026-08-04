@@ -24,15 +24,20 @@ TEXT_1 = "#E8ECF4"
 TEXT_2 = "#93A0B8"
 TEXT_3 = "#5F6E88"
 
-# Team identity: brand blue vs neutral steel. The away side is deliberately
-# not red — red belongs to the stat scale only.
+# Team identity: brand blue for home, dark gold for away, neutral grey for
+# the draw. Deliberately desaturated so the stat scales stay the loudest
+# thing on the page.
 HOME = "#4C8DFF"
-AWAY = "#8FA3BE"
-DRAW = "#33415C"
+AWAY = "#C9A227"
+DRAW = "#3D434D"
+
+# For "against" series, which represent an opponent in general rather than
+# the away side of this fixture.
+NEUTRAL = "#7A8598"
 
 # RGB forms, used when tinting cells toward a side rather than good/bad.
 HOME_RGB = np.array([76, 141, 255])
-AWAY_RGB = np.array([143, 163, 190])
+AWAY_RGB = np.array([201, 162, 39])
 
 # Reserved exclusively for stat scales (goals, shots on target, ATT/DEF,
 # SOD differential, model edge). Nothing structural uses these.
@@ -518,7 +523,7 @@ def strength_style(value, scale) -> str:
     where sign indicates which side is favoured rather than good or bad.
     Green/red would misread these: a large negative is a strong away signal,
     not a bad one. Intensity therefore tracks magnitude, and hue tracks the
-    side — home blue or away steel — so weak values sit near neutral and
+    side — home blue or away gold — so weak values sit near neutral and
     strong ones in either direction read as strong.
     """
     try:
@@ -791,8 +796,13 @@ def h2h_chart(row: dict, home_team: str, away_team: str):
     return fig
 
 
-def form_trend(df: pd.DataFrame, team: str, base: dict):
-    """Shots-on-target for and against across recent matches."""
+def form_trend(df: pd.DataFrame, team: str, base: dict,
+               colour: str = HOME):
+    """
+    Shots on target for and against across recent matches. `colour` is the
+    team's own identity colour, so the home chart reads blue and the away
+    chart gold.
+    """
     if df.empty:
         return None
     d = df.iloc[::-1]
@@ -801,13 +811,15 @@ def form_trend(df: pd.DataFrame, team: str, base: dict):
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=x, y=pd.to_numeric(d["SOF"], errors="coerce"),
-        mode="lines+markers", line=dict(color=HOME, width=2),
+        mode="lines+markers", line=dict(color=colour, width=2),
         marker=dict(size=6), name="SOF",
         customdata=d["Opponent"],
         hovertemplate="vs %{customdata}<br>SOF %{y:.0f}<extra></extra>"))
     fig.add_trace(go.Scatter(
         x=x, y=pd.to_numeric(d["SOA"], errors="coerce"),
-        mode="lines+markers", line=dict(color=AWAY, width=2, dash="dot"),
+        # Neutral, not AWAY — inside a single team's trend this is shots
+        # conceded, nothing to do with the away side of the fixture.
+        mode="lines+markers", line=dict(color=NEUTRAL, width=2, dash="dot"),
         marker=dict(size=6), name="SOA",
         customdata=d["Opponent"],
         hovertemplate="vs %{customdata}<br>SOA %{y:.0f}<extra></extra>"))
@@ -833,6 +845,22 @@ def metric_tile(label: str, value: str, color: str = TEXT_1) -> str:
         f'<div style="font-size:11px;color:{TEXT_3};letter-spacing:.04em;">{label}</div>'
         f'<div style="font-size:19px;font-weight:500;color:{color};">{value}</div>'
         f"</div>"
+    )
+
+
+def metric_pair(label: str, home_value: str, away_value: str) -> str:
+    """
+    Paired stat with each side in its own colour, so the reader never has to
+    work out which of the two numbers belongs to which team.
+    """
+    return (
+        f'<div style="background:{SURFACE_1};border-radius:8px;padding:9px 11px;">'
+        f'<div style="font-size:11px;color:{TEXT_3};letter-spacing:.04em;">{label}</div>'
+        f'<div style="font-size:19px;font-weight:500;">'
+        f'<span style="color:{HOME};">{home_value}</span>'
+        f'<span style="color:{TEXT_3};font-size:13px;"> · </span>'
+        f'<span style="color:{AWAY};">{away_value}</span>'
+        f"</div></div>"
     )
 
 
@@ -873,10 +901,12 @@ def render_help():
                 for term, desc in GLOSSARY
             )
             + f'<div style="margin-top:10px;color:{TEXT_3};">'
-              f"Coloured cells compare a value against that league's average: "
-              f'<span style="color:{GOOD_HEX};">green ▲</span> is better than '
-              f'average, <span style="color:{BAD_HEX};">red ▼</span> is worse. '
-              f"Hover any cell to see the exact league average.</div></div>",
+              f'<span style="color:{GOOD_HEX};">Green ▲</span> is above the '
+              f'league average, <span style="color:{BAD_HEX};">red ▼</span> '
+              f"below. Directional columns like Diff and SOD instead shade "
+              f'toward <span style="color:{HOME};">home</span> or '
+              f'<span style="color:{AWAY};">away</span>, depth showing '
+              f"strength. Hover any cell for its league average.</div></div>",
             unsafe_allow_html=True,
         )
 
@@ -1009,14 +1039,18 @@ def render_header(row, home_team, away_team, home_stats, away_stats,
         # side is favoured, not good or bad.
         sodd_color = HOME if float(sodd_raw) > 0 else AWAY
 
-    games = (f'{int(home_stats.get("Games") or 0)} vs '
-             f'{int(away_stats.get("Games") or 0)} games')
+    games = (f'<span style="color:{HOME};">'
+             f'{int(home_stats.get("Games") or 0)}</span> vs '
+             f'<span style="color:{AWAY};">'
+             f'{int(away_stats.get("Games") or 0)}</span> games')
 
     st.markdown(
         f"""
         <div style="display:flex;justify-content:space-between;align-items:baseline;">
-          <span style="font-size:19px;font-weight:500;color:{TEXT_1};">
-            {home_team} <span style="color:{TEXT_3};font-size:15px;">vs</span> {away_team}
+          <span style="font-size:19px;font-weight:500;">
+            <span style="color:{HOME};">{home_team}</span>
+            <span style="color:{TEXT_3};font-size:15px;"> vs </span>
+            <span style="color:{AWAY};">{away_team}</span>
           </span>
           <span style="font-size:13px;color:{TEXT_2};">{kickoff}</span>
         </div>
@@ -1028,11 +1062,13 @@ def render_header(row, home_team, away_team, home_stats, away_stats,
     )
 
     tiles = [
-        metric_tile("xG", f'{num("xgh")} · {num("xga")}'),
-        metric_tile("Expected SoT", f'{num("esoth", "{:.1f}")} · {num("esota", "{:.1f}")}'),
+        metric_pair("xG", num("xgh"), num("xga")),
+        metric_pair("Expected SoT",
+                    num("esoth", "{:.1f}"), num("esota", "{:.1f}")),
         metric_tile("SOD diff", num("sodd", "{:+.1f}"), sodd_color),
-        metric_tile("Form", f'{float(home_stats.get("Form") or 0):.2f} · '
-                            f'{float(away_stats.get("Form") or 0):.2f}'),
+        metric_pair("Form",
+                    f'{float(home_stats.get("Form") or 0):.2f}',
+                    f'{float(away_stats.get("Form") or 0):.2f}'),
     ]
     st.markdown(
         '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(112px,1fr));'
@@ -1322,10 +1358,7 @@ with tab_mutual:
             f"{len(mutual)} shared</div>",
             unsafe_allow_html=True,
         )
-        st.caption(
-            f"Diff shading shows signal strength, tinted toward "
-            f"{home_team} or {away_team}."
-        )
+        st.caption("Diff: shade depth = strength, colour = side favoured.")
         render_table(
             mutual,
             {**base, "ATT": base.get("Opp ATT"), "DEF": base.get("Opp DEF"),
@@ -1355,7 +1388,7 @@ with tab_form:
             st.caption("No recent matches found.")
             continue
         render_table(form, base, POSITIVE, NEGATIVE, formats)
-        trend = form_trend(form, team, base)
+        trend = form_trend(form, team, base, colour=color)
         if trend:
             st.plotly_chart(trend, use_container_width=True,
                             config=_PLOT_CONFIG)
