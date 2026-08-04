@@ -99,6 +99,18 @@ st.markdown(
     .stat-table thead th:first-child {{ text-align: left; color: {TEXT_1}; }}
     .table-wrap {{ overflow-x: auto; }}
 
+    .league-table td.stick0, .league-table th.stick0 {{
+        position: sticky; left: 0; z-index: 2;
+        background-color: {PAGE_BG};
+    }}
+    .league-table td.stick1, .league-table th.stick1 {{
+        position: sticky; left: 42px; z-index: 2;
+        background-color: {PAGE_BG};
+        box-shadow: 1px 0 0 {BORDER};
+    }}
+    .league-table th.stick0, .league-table th.stick1 {{ z-index: 3; }}
+    .league-table tbody tr:hover td {{ filter: brightness(1.15); }}
+
     @media (max-width: 640px) {{
         .block-container {{ padding: 0.6rem !important; }}
         .stat-table {{ font-size: 12px; }}
@@ -226,18 +238,25 @@ def load_teams() -> pd.DataFrame:
     """
     The whole team table, loaded once. Replaces get_team_stats,
     get_team_att_def and get_opponent_att_def, which previously ran one
-    query per team per lookup.
+    query per team per lookup. Also carries the standings columns, so the
+    league table tab needs no query of its own.
     """
     df = read_sql_df(
         """
         SELECT "TeamName", "League", "Games", "AGF", "AGA",
-               "ASOF", "ASOA", "ATT", "DEF", "Form"
+               "ASOF", "ASOA", "ATT", "DEF", "Form",
+               "StandingPosition", "StandingGames", "StandingPPG",
+               "StandingPoints", "StandingWins", "StandingDraws",
+               "StandingLosses"
         FROM list_of_teams
         """
     )
     if df.empty:
         return df
-    for c in ["Games", "AGF", "AGA", "ASOF", "ASOA", "ATT", "DEF", "Form"]:
+    for c in ["Games", "AGF", "AGA", "ASOF", "ASOA", "ATT", "DEF", "Form",
+              "StandingPosition", "StandingGames", "StandingPPG",
+              "StandingPoints", "StandingWins", "StandingDraws",
+              "StandingLosses"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.set_index("TeamName")
 
@@ -812,6 +831,136 @@ def render_help():
         )
 
 
+def build_league_table(teams: pd.DataFrame, league_name: str) -> pd.DataFrame:
+    """
+    Built entirely from the cached team table — no query of its own.
+
+    Mirrors the public league dashboard: only teams with games played, ordered
+    by stored position, then PPG, points and name. AGF/AGA/ASOF/ASOA are
+    per-game averages already held in list_of_teams, so no goal totals need
+    aggregating from matchstats.
+    """
+    cols = ["StandingPosition", "StandingGames", "StandingPPG",
+            "StandingPoints", "StandingWins", "StandingDraws",
+            "StandingLosses", "AGF", "AGA", "ASOF", "ASOA"]
+
+    if teams.empty or not league_name or "League" not in teams.columns:
+        return pd.DataFrame()
+
+    table = teams[teams["League"] == league_name].copy()
+    if table.empty:
+        return pd.DataFrame()
+
+    for c in cols:
+        if c not in table.columns:
+            table[c] = pd.NA
+        table[c] = pd.to_numeric(table[c], errors="coerce")
+
+    table = table[table["StandingGames"] > 0]
+    if table.empty:
+        return pd.DataFrame()
+
+    table = table.reset_index().rename(columns={
+        "TeamName": "Team",
+        "StandingPosition": "Pos",
+        "StandingGames": "G",
+        "StandingPPG": "PPG",
+        "StandingPoints": "Pts",
+        "StandingWins": "W",
+        "StandingDraws": "D",
+        "StandingLosses": "L",
+    })
+
+    table = table.sort_values(
+        ["Pos", "PPG", "Pts", "Team"],
+        ascending=[True, False, False, True],
+    )
+
+    return table[["Pos", "Team", "G", "PPG", "Pts", "W", "D", "L",
+                  "AGF", "AGA", "ASOF", "ASOA"]].reset_index(drop=True)
+
+
+def render_league_table(table: pd.DataFrame, baselines: dict,
+                        home_team: str, away_team: str):
+    """
+    Position and Team stay fixed while the rate columns scroll, matching the
+    pinned columns on the public dashboard. The four averages are shaded
+    against the league baseline using the same scale as the rest of the app.
+    """
+    if table.empty:
+        st.caption("No standings available for this league.")
+        return
+
+    shaded = {
+        "AGF": (baselines.get("GF"), True),
+        "AGA": (baselines.get("GA"), False),
+        "ASOF": (baselines.get("SOF"), True),
+        "ASOA": (baselines.get("SOA"), False),
+    }
+    ints = {"Pos", "G", "Pts", "W", "D", "L"}
+
+    head = "".join(
+        f'<th class="{"stick0" if c == "Pos" else "stick1" if c == "Team" else ""}">{c}</th>'
+        for c in table.columns
+    )
+
+    rows = []
+    for _, r in table.iterrows():
+        team = str(r["Team"])
+        if team == home_team:
+            accent, bg = HOME, SURFACE_2
+        elif team == away_team:
+            accent, bg = AWAY, SURFACE_2
+        else:
+            accent, bg = "transparent", PAGE_BG
+
+        cells = []
+        for col in table.columns:
+            val = r[col]
+            if col == "Pos":
+                cells.append(
+                    f'<td class="stick0" style="background:{bg};color:{TEXT_3};'
+                    f'border-left:3px solid {accent};">'
+                    f'{"—" if pd.isna(val) else int(val)}</td>')
+            elif col == "Team":
+                colour = accent if accent != "transparent" else TEXT_1
+                cells.append(
+                    f'<td class="stick1" style="background:{bg};color:{colour};'
+                    f'text-align:left;">{team}</td>')
+            elif col in shaded:
+                avg, higher = shaded[col]
+                text_val = "—" if pd.isna(val) else f"{float(val):.2f}"
+                style = cell_style(val, avg, higher_is_better=higher)
+                mark = deviation_marker(val, avg, higher_is_better=higher)
+                title = (f"{col}: {text_val} · league average {avg:.2f}"
+                         if avg else col)
+                cells.append(
+                    f'<td style="{style}" title="{title}">{text_val}'
+                    f'<span style="font-size:10px;opacity:.75;">{mark}</span></td>')
+            else:
+                if pd.isna(val):
+                    text_val = "—"
+                elif col in ints:
+                    text_val = f"{int(val)}"
+                else:
+                    text_val = f"{float(val):.2f}"
+                weight = "font-weight:500;" if col == "Pts" else ""
+                cells.append(
+                    f'<td style="background:{bg};color:{TEXT_1};{weight}">'
+                    f"{text_val}</td>")
+
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    st.markdown(
+        f'<div class="table-wrap"><table class="stat-table league-table">'
+        f"<thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody>"
+        f"</table></div>",
+        unsafe_allow_html=True,
+    )
+
+
+
+
 def render_header(row, home_team, away_team, home_stats, away_stats,
                   league, match_date, kickoff):
     def num(key, fmt="{:.2f}"):
@@ -1090,8 +1239,9 @@ render_header(row, home_team, away_team, home_stats, away_stats,
 render_edge(row, home_team, away_team)
 render_help()
 
-tab_cmp, tab_mutual, tab_form, tab_h2h = st.tabs(
-    ["Comparison", "Mutual opponents", "Recent form", "Head to head"]
+tab_cmp, tab_mutual, tab_form, tab_h2h, tab_league = st.tabs(
+    ["Comparison", "Mutual opponents", "Recent form", "Head to head",
+     "League table"]
 )
 
 POSITIVE = ["GF", "SOF", "SF", "Opp ATT", "ATT", "H SOF", "A SOF"]
@@ -1217,6 +1367,24 @@ with tab_h2h:
                 "SoT": score("homeshotson", "awayshotson"),
             })
             render_table(hist, {}, [], [])
+
+with tab_league:
+    league_table = build_league_table(teams_df, league_key)
+    if league_table.empty:
+        st.caption(
+            f"No standings available for {league_key}. Cup competitions and "
+            "leagues without a recorded season start are not ranked."
+        )
+    else:
+        st.caption(
+            f"{len(league_table)} teams. Ranked by points per game, then "
+            f"total points, so a side with games in hand can sit above one "
+            f"on more points. AGF, AGA, ASOF and ASOA are per-game averages "
+            f"shaded against the league average. {home_team} and {away_team} "
+            f"are highlighted."
+        )
+        render_league_table(league_table, base, home_team, away_team)
+
 
 st.divider()
 if st.button("Refresh data"):
