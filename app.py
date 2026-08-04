@@ -30,6 +30,10 @@ HOME = "#4C8DFF"
 AWAY = "#8FA3BE"
 DRAW = "#33415C"
 
+# RGB forms, used when tinting cells toward a side rather than good/bad.
+HOME_RGB = np.array([76, 141, 255])
+AWAY_RGB = np.array([143, 163, 190])
+
 # Reserved exclusively for stat scales (goals, shots on target, ATT/DEF,
 # SOD differential, model edge). Nothing structural uses these.
 GOOD = np.array([16, 185, 129])
@@ -508,6 +512,31 @@ def cell_style(value, avg, higher_is_better=True) -> str:
         return f"background-color:{SURFACE_2};color:{TEXT_1};"
 
 
+def strength_style(value, scale) -> str:
+    """
+    For directional differentials like SODD and the mutual-opponent Diff,
+    where sign indicates which side is favoured rather than good or bad.
+    Green/red would misread these: a large negative is a strong away signal,
+    not a bad one. Intensity therefore tracks magnitude, and hue tracks the
+    side — home blue or away steel — so weak values sit near neutral and
+    strong ones in either direction read as strong.
+    """
+    try:
+        value = float(value)
+        if pd.isna(value) or not scale:
+            return f"background-color:{SURFACE_2};color:{TEXT_1};"
+
+        intensity = float(np.tanh(abs(value) / scale * 1.2))
+        target = HOME_RGB if value > 0 else AWAY_RGB
+        rgb = np.clip(CELL_BASE + (target - CELL_BASE) * intensity,
+                      0, 255).astype(int)
+        lum = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]
+        fg = PAGE_BG if lum > 140 else TEXT_1
+        return f"background-color:rgb({rgb[0]},{rgb[1]},{rgb[2]});color:{fg};"
+    except (TypeError, ValueError):
+        return f"background-color:{SURFACE_2};color:{TEXT_1};"
+
+
 def signed_style(value, scale) -> str:
     """
     For differentials, where zero is neutral rather than a baseline ratio.
@@ -568,12 +597,15 @@ def deviation_marker(value, avg, higher_is_better=True) -> str:
 def render_table(df: pd.DataFrame, baselines: dict,
                  positive: list[str], negative: list[str],
                  formats: dict | None = None,
-                 signed: dict | None = None):
+                 signed: dict | None = None,
+                 strength: dict | None = None):
     """
     Hand-rendered HTML so the gradient survives, wrapped for horizontal scroll
     on narrow screens rather than crushing columns.
 
-    `signed` maps column name -> intensity scale for zero-anchored columns.
+    `signed`   maps column -> scale for zero-neutral good/bad columns.
+    `strength` maps column -> scale for directional columns, tinted toward
+               the side they favour rather than green/red.
     """
     if df.empty:
         st.caption("No data available.")
@@ -581,6 +613,7 @@ def render_table(df: pd.DataFrame, baselines: dict,
 
     formats = formats or {}
     signed = signed or {}
+    strength = strength or {}
     head = "".join(f"<th>{c}</th>" for c in df.columns)
     body = []
 
@@ -599,7 +632,12 @@ def render_table(df: pd.DataFrame, baselines: dict,
             else:
                 text_val = str(val)
 
-            if col in signed:
+            if col in strength:
+                style = strength_style(val, strength[col])
+                cells.append(
+                    f'<td style="{style}" title="{col}: {text_val}">'
+                    f"{text_val}</td>")
+            elif col in signed:
                 style = signed_style(val, signed[col])
                 mark = ""
                 try:
@@ -967,7 +1005,9 @@ def render_header(row, home_team, away_team, home_stats, away_stats,
     sodd_raw = row.get("sodd")
     sodd_color = TEXT_1
     if sodd_raw is not None and pd.notna(sodd_raw):
-        sodd_color = GOOD_HEX if float(sodd_raw) > 0 else BAD_HEX
+        # Same reasoning as the mutual-opponent Diff: sign indicates which
+        # side is favoured, not good or bad.
+        sodd_color = HOME if float(sodd_raw) > 0 else AWAY
 
     games = (f'{int(home_stats.get("Games") or 0)} vs '
              f'{int(away_stats.get("Games") or 0)} games')
@@ -1182,14 +1222,10 @@ c_fixture.selectbox("Fixture", [PLACEHOLDER_FIXTURE] + fixtures_list,
                     key="fixture_select", on_change=_on_fixture,
                     label_visibility="collapsed")
 
-st.caption("Enter an EventID directly, or filter by date → league → fixture.")
+st.caption("EventID, or date → league → fixture.")
 
 if not st.session_state.sel_eventid:
-    st.info(
-        "Pick a league and fixture above to see the underlying stats for that "
-        "match — model projections, form against comparable opponents, and how "
-        "the numbers compare to the league average."
-    )
+    st.info("Select a fixture above.")
     render_help()
     st.stop()
 
@@ -1249,7 +1285,7 @@ with tab_cmp:
         comparison_chart(home_stats, away_stats, home_team, away_team, base),
         use_container_width=True, config=_PLOT_CONFIG,
     )
-    st.caption("Dotted line marks the league average for each stat.")
+    st.caption("Dotted line: league average.")
 
 with tab_mutual:
     col_window, col_note = st.columns([1, 3])
@@ -1273,15 +1309,9 @@ with tab_mutual:
                                      teams_df, days=days).empty
         ]
         if wider:
-            st.caption(
-                f"No shared opponents in the {window_label.lower()}. "
-                f"Try {wider[0].lower()}."
-            )
+            st.caption(f"None in this window. Try {wider[0].lower()}.")
         else:
-            st.caption(
-                f"No shared opponents in the {window_label.lower()}. "
-                "These two teams have no recent opponents in common."
-            )
+            st.caption("No shared opponents.")
     else:
         diff_scale = signed_scale(mutual["Diff"])
         component_scale = signed_scale(
@@ -1289,15 +1319,12 @@ with tab_mutual:
         )
         col_note.markdown(
             f'<div style="font-size:13px;color:{TEXT_3};padding-top:8px;">'
-            f"{len(mutual)} shared opponent"
-            f"{'s' if len(mutual) != 1 else ''} in the "
-            f"{window_label.lower()}</div>",
+            f"{len(mutual)} shared</div>",
             unsafe_allow_html=True,
         )
         st.caption(
-            f"H Diff and A Diff are each side's shots on target for minus "
-            f"against, versus that same opponent. Diff is H Diff − A Diff: "
-            f"positive favours {home_team}, negative favours {away_team}."
+            f"Diff shading shows signal strength, tinted toward "
+            f"{home_team} or {away_team}."
         )
         render_table(
             mutual,
@@ -1308,9 +1335,8 @@ with tab_mutual:
             {"ATT": "{:.2f}", "DEF": "{:.2f}", "H SOF": "{:.0f}",
              "H SOA": "{:.0f}", "A SOF": "{:.0f}", "A SOA": "{:.0f}",
              "H Diff": "{:+.0f}", "A Diff": "{:+.0f}", "Diff": "{:+.0f}"},
-            signed={"H Diff": component_scale,
-                    "A Diff": component_scale,
-                    "Diff": diff_scale},
+            signed={"H Diff": component_scale, "A Diff": component_scale},
+            strength={"Diff": diff_scale},
         )
 
 with tab_form:
@@ -1341,7 +1367,7 @@ with tab_h2h:
     else:
         latest = h2h.iloc[0].to_dict()
         st.caption(f"Last met {relative_day(latest['date'])} · "
-                   f"{len(h2h)} meetings on record")
+                   f"{len(h2h)} meetings")
         st.plotly_chart(h2h_chart(latest, latest.get("hometeam", home_team),
                                   latest.get("awayteam", away_team)),
                         use_container_width=True, config=_PLOT_CONFIG)
@@ -1368,18 +1394,9 @@ with tab_h2h:
 with tab_league:
     league_table = build_league_table(teams_df, league_key)
     if league_table.empty:
-        st.caption(
-            f"No standings available for {league_key}. Cup competitions and "
-            "leagues without a recorded season start are not ranked."
-        )
+        st.caption("No standings for this league.")
     else:
-        st.caption(
-            f"{len(league_table)} teams. Ranked by points per game, then "
-            f"total points, so a side with games in hand can sit above one "
-            f"on more points. AGF, AGA, ASOF and ASOA are per-game averages "
-            f"shaded against the league average. {home_team} and {away_team} "
-            f"are highlighted."
-        )
+        st.caption("Ranked by points per game.")
         render_league_table(league_table, base, home_team, away_team)
 
 
