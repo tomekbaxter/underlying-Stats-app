@@ -127,10 +127,22 @@ _PLOT_LAYOUT = dict(
     font=dict(color=TEXT_1, size=13),
     margin=dict(l=6, r=6, t=10, b=6),
     showlegend=False,
+    # No chart here benefits from zoom or pan, and on a phone the drag
+    # handlers intercept scrolling. dragmode=False plus fixedrange on both
+    # axes disables pinch-zoom, drag-pan and box-select while leaving hover
+    # tooltips working — staticPlot would remove those too.
+    dragmode=False,
     hoverlabel=dict(bgcolor=SURFACE_2, bordercolor=BORDER,
                     font=dict(color=TEXT_1, size=12)),
 )
-_PLOT_CONFIG = {"displayModeBar": False, "responsive": True}
+_PLOT_CONFIG = {
+    "displayModeBar": False,
+    "responsive": True,
+    "scrollZoom": False,
+    "doubleClick": False,
+    "showAxisDragHandles": False,
+    "showAxisRangeEntryBoxes": False,
+}
 
 
 # ============================================================
@@ -682,8 +694,8 @@ def comparison_chart(home_stats, away_stats, home_team, away_team, base):
     fig.update_layout(**_PLOT_LAYOUT, barmode="overlay",
                       height=44 * len(rows) + 30)
     fig.update_xaxes(range=[-1.4, 1.4], showgrid=False, zeroline=False,
-                     showticklabels=False)
-    fig.update_yaxes(showgrid=False, autorange="reversed",
+                     showticklabels=False, fixedrange=True)
+    fig.update_yaxes(showgrid=False, autorange="reversed", fixedrange=True,
                      tickfont=dict(color=TEXT_2, size=12))
     return fig
 
@@ -735,8 +747,8 @@ def h2h_chart(row: dict, home_team: str, away_team: str):
     fig.update_layout(**_PLOT_LAYOUT, barmode="overlay",
                       height=44 * len(rows) + 30)
     fig.update_xaxes(range=[-1.4, 1.4], showgrid=False, zeroline=False,
-                     showticklabels=False)
-    fig.update_yaxes(showgrid=False, autorange="reversed",
+                     showticklabels=False, fixedrange=True)
+    fig.update_yaxes(showgrid=False, autorange="reversed", fixedrange=True,
                      tickfont=dict(color=TEXT_2, size=12))
     return fig
 
@@ -767,9 +779,9 @@ def form_trend(df: pd.DataFrame, team: str, base: dict):
                                                dash="dash"))
 
     fig.update_layout(**_PLOT_LAYOUT, height=180)
-    fig.update_xaxes(showgrid=False, showticklabels=False)
+    fig.update_xaxes(showgrid=False, showticklabels=False, fixedrange=True)
     fig.update_yaxes(showgrid=True, gridcolor=BORDER, zeroline=False,
-                     tickfont=dict(color=TEXT_3, size=11))
+                     fixedrange=True, tickfont=dict(color=TEXT_3, size=11))
     return fig
 
 
@@ -883,9 +895,9 @@ def build_league_table(teams: pd.DataFrame, league_name: str) -> pd.DataFrame:
 def render_league_table(table: pd.DataFrame, baselines: dict,
                         home_team: str, away_team: str):
     """
-    Position and Team stay fixed while the rate columns scroll, matching the
-    pinned columns on the public dashboard. The four averages are shaded
-    against the league baseline using the same scale as the rest of the app.
+    Rendered through st.dataframe so column headers stay click-sortable.
+    Styler only changes how values display, so sorting still runs on the
+    underlying numbers rather than the formatted strings.
     """
     if table.empty:
         st.caption("No standings available for this league.")
@@ -897,67 +909,52 @@ def render_league_table(table: pd.DataFrame, baselines: dict,
         "ASOF": (baselines.get("SOF"), True),
         "ASOA": (baselines.get("SOA"), False),
     }
-    ints = {"Pos", "G", "Pts", "W", "D", "L"}
 
-    head = "".join(
-        f'<th class="{"stick0" if c == "Pos" else "stick1" if c == "Team" else ""}">{c}</th>'
-        for c in table.columns
-    )
-
-    rows = []
-    for _, r in table.iterrows():
-        team = str(r["Team"])
-        if team == home_team:
-            accent, bg = HOME, SURFACE_2
-        elif team == away_team:
-            accent, bg = AWAY, SURFACE_2
-        else:
-            accent, bg = "transparent", PAGE_BG
-
-        cells = []
+    def style_row(row):
+        team = row["Team"]
+        fixture_side = (HOME if team == home_team
+                        else AWAY if team == away_team else None)
+        out = []
         for col in table.columns:
-            val = r[col]
-            if col == "Pos":
-                cells.append(
-                    f'<td class="stick0" style="background:{bg};color:{TEXT_3};'
-                    f'border-left:3px solid {accent};">'
-                    f'{"—" if pd.isna(val) else int(val)}</td>')
-            elif col == "Team":
-                colour = accent if accent != "transparent" else TEXT_1
-                cells.append(
-                    f'<td class="stick1" style="background:{bg};color:{colour};'
-                    f'text-align:left;">{team}</td>')
-            elif col in shaded:
+            if col in shaded:
                 avg, higher = shaded[col]
-                text_val = "—" if pd.isna(val) else f"{float(val):.2f}"
-                style = cell_style(val, avg, higher_is_better=higher)
-                mark = deviation_marker(val, avg, higher_is_better=higher)
-                title = (f"{col}: {text_val} · league average {avg:.2f}"
-                         if avg else col)
-                cells.append(
-                    f'<td style="{style}" title="{title}">{text_val}'
-                    f'<span style="font-size:10px;opacity:.75;">{mark}</span></td>')
+                out.append(cell_style(row[col], avg, higher_is_better=higher))
+            elif fixture_side:
+                colour = fixture_side if col == "Team" else TEXT_1
+                out.append(f"background-color:{SURFACE_2};color:{colour};"
+                           "font-weight:500;")
             else:
-                if pd.isna(val):
-                    text_val = "—"
-                elif col in ints:
-                    text_val = f"{int(val)}"
-                else:
-                    text_val = f"{float(val):.2f}"
-                weight = "font-weight:500;" if col == "Pts" else ""
-                cells.append(
-                    f'<td style="background:{bg};color:{TEXT_1};{weight}">'
-                    f"{text_val}</td>")
+                out.append("")
+        return out
 
-        rows.append("<tr>" + "".join(cells) + "</tr>")
+    def rate(col):
+        avg, higher = shaded[col]
 
-    st.markdown(
-        f'<div class="table-wrap"><table class="stat-table league-table">'
-        f"<thead><tr>{head}</tr></thead><tbody>{''.join(rows)}</tbody>"
-        f"</table></div>",
-        unsafe_allow_html=True,
+        def fmt(v):
+            if pd.isna(v):
+                return "—"
+            return f"{float(v):.2f}{deviation_marker(v, avg, higher)}"
+        return fmt
+
+    formats = {
+        "Pos": lambda v: "—" if pd.isna(v) else f"{int(v)}",
+        "G": lambda v: "—" if pd.isna(v) else f"{int(v)}",
+        "Pts": lambda v: "—" if pd.isna(v) else f"{int(v)}",
+        "W": lambda v: "—" if pd.isna(v) else f"{int(v)}",
+        "D": lambda v: "—" if pd.isna(v) else f"{int(v)}",
+        "L": lambda v: "—" if pd.isna(v) else f"{int(v)}",
+        "PPG": lambda v: "—" if pd.isna(v) else f"{float(v):.2f}",
+        **{c: rate(c) for c in shaded},
+    }
+
+    styler = table.style.apply(style_row, axis=1).format(formats)
+
+    st.dataframe(
+        styler,
+        hide_index=True,
+        use_container_width=True,
+        height=min(700, 36 * len(table) + 44),
     )
-
 
 
 
