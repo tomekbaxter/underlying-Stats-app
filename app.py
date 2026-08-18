@@ -269,9 +269,7 @@ def load_teams() -> pd.DataFrame:
                "ASOF", "ASOA", "ATT", "DEF", "Form",
                "StandingPosition", "StandingGames", "StandingPPG",
                "StandingPoints", "StandingWins", "StandingDraws",
-               "StandingLosses",
-               "Venue", "VenueCity", "VenueCountry",
-               "VenueLat", "VenueLon", "VenueConfidence"
+               "StandingLosses"
         FROM list_of_teams
         """
     )
@@ -280,7 +278,7 @@ def load_teams() -> pd.DataFrame:
     for c in ["Games", "AGF", "AGA", "ASOF", "ASOA", "ATT", "DEF", "Form",
               "StandingPosition", "StandingGames", "StandingPPG",
               "StandingPoints", "StandingWins", "StandingDraws",
-              "StandingLosses", "VenueLat", "VenueLon"]:
+              "StandingLosses"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
     return df.set_index("TeamName")
 
@@ -796,14 +794,18 @@ def h2h_chart(row: dict, fixture_home: str, fixture_away: str):
                       "%{customdata[0]:.0f}<extra></extra>",
     ))
 
-    # Name each side above its own half, in its own colour, so the reader
-    # never has to work out which bar belongs to whom.
-    fig.add_annotation(x=-1.35, y=-0.9, xref="x", yref="y",
+    # Name each side above its own half, in its own colour. Positioned in
+    # paper coordinates rather than data coordinates so the y-axis is left
+    # exactly as the other charts have it — an explicit numeric range on a
+    # categorical axis can drop bars entirely.
+    fig.add_annotation(x=0, y=1.0, xref="paper", yref="paper",
                        text=f"{past_home} (H)", showarrow=False,
-                       xanchor="left", font=dict(color=left_colour, size=12))
-    fig.add_annotation(x=1.35, y=-0.9, xref="x", yref="y",
+                       xanchor="left", yanchor="bottom",
+                       font=dict(color=left_colour, size=12))
+    fig.add_annotation(x=1, y=1.0, xref="paper", yref="paper",
                        text=f"{past_away} (A)", showarrow=False,
-                       xanchor="right", font=dict(color=right_colour, size=12))
+                       xanchor="right", yanchor="bottom",
+                       font=dict(color=right_colour, size=12))
 
     for i, (label, h, a, ref) in enumerate(rows):
         fig.add_annotation(x=-(h / ref) - 0.05, y=i, text=f"{h:.0f}",
@@ -814,13 +816,13 @@ def h2h_chart(row: dict, fixture_home: str, fixture_away: str):
                            font=dict(color=TEXT_1, size=12))
 
     fig.add_vline(x=0, line_color=BORDER, line_width=1)
-    fig.update_layout(**_PLOT_LAYOUT, barmode="overlay",
-                      height=44 * len(rows) + 56)
+    # Top margin widened for the two labels; every other layout value and the
+    # axes themselves are identical to the other charts.
+    fig.update_layout(**{**_PLOT_LAYOUT, "margin": dict(l=6, r=6, t=28, b=6)},
+                      barmode="overlay", height=44 * len(rows) + 48)
     fig.update_xaxes(range=[-1.4, 1.4], showgrid=False, zeroline=False,
                      showticklabels=False, fixedrange=True)
-    # Extra headroom above the first bar for the two team labels.
-    fig.update_yaxes(showgrid=False, autorange=False,
-                     range=[len(rows) - 0.5, -1.3], fixedrange=True,
+    fig.update_yaxes(showgrid=False, autorange="reversed", fixedrange=True,
                      tickfont=dict(color=TEXT_2, size=12))
     return fig
 
@@ -1053,164 +1055,6 @@ def render_league_table(table: pd.DataFrame, baselines: dict,
         height=min(700, 36 * len(table) + 44),
     )
 
-
-
-# ============================================================
-# MATCH CONTEXT — travel and weather
-# ============================================================
-
-def haversine_km(lat1, lon1, lat2, lon2) -> float:
-    """Great-circle distance. Exact arithmetic on stored coordinates."""
-    r = 6371.0
-    p1, p2 = math.radians(lat1), math.radians(lat2)
-    dp, dl = math.radians(lat2 - lat1), math.radians(lon2 - lon1)
-    a = (math.sin(dp / 2) ** 2
-         + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2)
-    return 2 * r * math.asin(math.sqrt(a))
-
-
-def travel_estimate(straight_km: float, cross_border: bool) -> dict:
-    """
-    Rough banding, not a routing result. Road distance runs roughly 25% above
-    straight line; effective speed absorbs stops and congestion. Air time adds
-    a fixed allowance for getting to and through airports.
-    """
-    road_km = straight_km * 1.25
-
-    if straight_km < 1:
-        return {"mode": "Same venue", "distance_km": 0.0, "hours": 0.0,
-                "note": "Both clubs share this ground."}
-
-    if road_km <= 60:
-        mode, hours = "Local drive", road_km / 45
-    elif road_km <= 400:
-        mode, hours = "Drive", road_km / 75
-    elif road_km <= 900:
-        mode, hours = "Long drive or rail", road_km / 85
-    else:
-        mode, hours = "Flight", 2.5 + straight_km / 750
-
-    note = ""
-    if cross_border and road_km > 60:
-        note = ("Crossing a border — a sea leg or flight may be needed even "
-                "at short distance.")
-
-    return {"mode": mode, "distance_km": straight_km, "road_km": road_km,
-            "hours": hours, "note": note}
-
-
-def format_hours(hours: float) -> str:
-    if hours <= 0:
-        return "—"
-    h, m = int(hours), int(round((hours - int(hours)) * 60))
-    if m == 60:
-        h, m = h + 1, 0
-    return f"{h}h {m:02d}m" if h else f"{m}m"
-
-
-@st.cache_data(ttl=1800)
-def fetch_weather(lat: float, lon: float, when: str | None) -> dict | None:
-    """
-    Open-Meteo: free, no key, no attribution requirement. timezone=auto also
-    returns the venue's local clock, so this doubles as the local-time source.
-    Forecasts run about 7 days ahead; anything beyond returns nothing.
-    """
-    try:
-        import requests
-    except ImportError:
-        return None
-
-    try:
-        resp = requests.get(
-            "https://api.open-meteo.com/v1/forecast",
-            params={
-                "latitude": round(float(lat), 3),
-                "longitude": round(float(lon), 3),
-                "hourly": ("temperature_2m,precipitation_probability,"
-                           "wind_speed_10m,weather_code"),
-                "timezone": "auto",
-                "forecast_days": 7,
-            },
-            timeout=6,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception:
-        return None
-
-    hourly = data.get("hourly") or {}
-    times = hourly.get("time") or []
-    if not times:
-        return None
-
-    idx = 0
-    if when:
-        # Nearest forecast hour to kickoff, in the venue's own local time.
-        target = when[:13]
-        matches = [i for i, t in enumerate(times) if t[:13] == target]
-        if matches:
-            idx = matches[0]
-        else:
-            return {"timezone": data.get("timezone"),
-                    "utc_offset": data.get("utc_offset_seconds"),
-                    "out_of_range": True}
-
-    def at(key):
-        series = hourly.get(key) or []
-        return series[idx] if idx < len(series) else None
-
-    return {
-        "timezone": data.get("timezone"),
-        "utc_offset": data.get("utc_offset_seconds"),
-        "time": times[idx] if idx < len(times) else None,
-        "temp": at("temperature_2m"),
-        "rain": at("precipitation_probability"),
-        "wind": at("wind_speed_10m"),
-        "code": at("weather_code"),
-        "out_of_range": False,
-    }
-
-
-# Condensed WMO weather codes. Full table is 28 entries with distinctions
-# that don't change how a match plays.
-WEATHER_CODES = {
-    0: "Clear", 1: "Mostly clear", 2: "Partly cloudy", 3: "Overcast",
-    45: "Fog", 48: "Freezing fog",
-    51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle",
-    56: "Freezing drizzle", 57: "Freezing drizzle",
-    61: "Light rain", 63: "Rain", 65: "Heavy rain",
-    66: "Freezing rain", 67: "Freezing rain",
-    71: "Light snow", 73: "Snow", 75: "Heavy snow", 77: "Snow grains",
-    80: "Light showers", 81: "Showers", 82: "Heavy showers",
-    85: "Snow showers", 86: "Heavy snow showers",
-    95: "Thunderstorm", 96: "Thunderstorm with hail",
-    99: "Thunderstorm with hail",
-}
-
-
-def venue_of(stats: dict) -> dict | None:
-    lat, lon = stats.get("VenueLat"), stats.get("VenueLon")
-    if lat is None or lon is None or pd.isna(lat) or pd.isna(lon):
-        return None
-    return {
-        "name": stats.get("Venue"),
-        "city": stats.get("VenueCity"),
-        "country": stats.get("VenueCountry"),
-        "lat": float(lat),
-        "lon": float(lon),
-        "confidence": stats.get("VenueConfidence"),
-    }
-
-
-def info_tile(label: str, value: str, sub: str = "") -> str:
-    subline = (f'<div style="font-size:11px;color:{TEXT_3};margin-top:2px;">'
-               f"{sub}</div>") if sub else ""
-    return (
-        f'<div style="background:{SURFACE_1};border-radius:8px;padding:10px 12px;">'
-        f'<div style="font-size:11px;color:{TEXT_3};letter-spacing:.04em;">{label}</div>'
-        f'<div style="font-size:17px;font-weight:500;color:{TEXT_1};margin-top:2px;">'
-        f"{value}</div>{subline}</div>"
-    )
 
 
 def render_header(row, home_team, away_team, home_stats, away_stats,
@@ -1495,9 +1339,9 @@ render_header(row, home_team, away_team, home_stats, away_stats,
 render_edge(row, home_team, away_team)
 render_help()
 
-tab_cmp, tab_mutual, tab_form, tab_h2h, tab_league, tab_info = st.tabs(
+tab_cmp, tab_mutual, tab_form, tab_h2h, tab_league = st.tabs(
     ["Comparison", "Mutual opponents", "Recent form", "Head to head",
-     "League table", "Match info"]
+     "League table"]
 )
 
 POSITIVE = ["GF", "SOF", "SF", "Opp ATT", "ATT", "H SOF", "A SOF"]
@@ -1620,87 +1464,6 @@ with tab_league:
     else:
         st.caption("Ranked by points per game.")
         render_league_table(league_table, base, home_team, away_team)
-
-with tab_info:
-    home_venue = venue_of(home_stats)
-    away_venue = venue_of(away_stats)
-
-    if not home_venue:
-        st.caption(f"No venue on record for {home_team}.")
-    else:
-        local = None
-        weather = None
-        kickoff_local = None
-
-        # Kickoff as stored, used to pick the matching forecast hour.
-        ko_iso = None
-        if pd.notna(_d):
-            ko_hour = kickoff[:2] if kickoff and kickoff[0].isdigit() else "15"
-            ko_iso = f"{_d.strftime('%Y-%m-%d')}T{ko_hour}:00"
-
-        weather = fetch_weather(home_venue["lat"], home_venue["lon"], ko_iso)
-
-        tiles = []
-
-        place = ", ".join(p for p in (home_venue["name"], home_venue["city"])
-                          if p) or "—"
-        tiles.append(info_tile("Venue", place,
-                               home_venue["country"] or ""))
-
-        if weather and weather.get("timezone"):
-            tz_name = weather["timezone"]
-            offset = weather.get("utc_offset") or 0
-            local_label = tz_name.split("/")[-1].replace("_", " ")
-            if ko_iso:
-                kickoff_local = ko_iso[11:16]
-            tiles.append(info_tile("Local kickoff",
-                                   kickoff_local or kickoff,
-                                   f"{local_label} · UTC{offset // 3600:+d}"))
-
-        if away_venue:
-            cross = (home_venue["country"] or "") != (away_venue["country"] or "")
-            dist = haversine_km(away_venue["lat"], away_venue["lon"],
-                                home_venue["lat"], home_venue["lon"])
-            trip = travel_estimate(dist, cross)
-            tiles.append(info_tile("Away travel",
-                                   f"{trip['distance_km']:,.0f} km",
-                                   "straight line"))
-            tiles.append(info_tile("Est. journey",
-                                   format_hours(trip["hours"]),
-                                   trip["mode"]))
-
-        if weather and not weather.get("out_of_range") and weather.get("temp") is not None:
-            cond = WEATHER_CODES.get(weather.get("code"), "—")
-            tiles.append(info_tile("Forecast",
-                                   f"{weather['temp']:.0f}°C",
-                                   cond))
-            tiles.append(info_tile("Rain / wind",
-                                   f"{weather.get('rain') or 0:.0f}%",
-                                   f"{weather.get('wind') or 0:.0f} km/h wind"))
-
-        st.markdown(
-            '<div style="display:grid;grid-template-columns:'
-            'repeat(auto-fit,minmax(150px,1fr));gap:8px;margin-bottom:10px;">'
-            + "".join(tiles) + "</div>",
-            unsafe_allow_html=True,
-        )
-
-        notes = []
-        if not away_venue:
-            notes.append(f"No venue on record for {away_team}, so no travel "
-                         f"estimate.")
-        elif trip.get("note"):
-            notes.append(trip["note"])
-        if weather and weather.get("out_of_range"):
-            notes.append("Kickoff is beyond the 7-day forecast window.")
-        if home_venue.get("confidence") == "medium":
-            notes.append("Venue located to town level only.")
-
-        if notes:
-            st.caption(" ".join(notes))
-        else:
-            st.caption("Journey times are rough banded estimates, not routing.")
-
 
 st.divider()
 if st.button("Refresh data"):
