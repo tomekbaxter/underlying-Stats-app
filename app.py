@@ -1462,8 +1462,23 @@ with tab_league:
     if league_table.empty:
         st.caption("No standings for this league.")
     else:
-        st.caption("Ranked by points per game.")
-        render_league_table(league_table, base, home_team, away_team)
+        cap_col, tog_col = st.columns([3, 1])
+        with tog_col:
+            fixture_only = st.toggle("Fixture teams only", key="league_fixture_only",
+                                     help="Show only the two teams in this fixture.")
+        if fixture_only:
+            # Positions, colours and league-average shading are unchanged; only
+            # the other teams' rows are hidden.
+            shown = league_table[league_table["Team"].isin([home_team, away_team])]
+            with cap_col:
+                st.caption("Fixture teams only." if not shown.empty else
+                           "Neither fixture team is in this league's table.")
+        else:
+            shown = league_table
+            with cap_col:
+                st.caption("Ranked by points per game.")
+        if not shown.empty:
+            render_league_table(shown.reset_index(drop=True), base, home_team, away_team)
 
 st.divider()
 if st.button("Refresh data"):
