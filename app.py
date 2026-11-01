@@ -108,6 +108,11 @@ st.markdown(
     .stat-table tbody td:first-child,
     .stat-table thead th:first-child {{ text-align: left; color: {TEXT_1}; }}
     .table-wrap {{ overflow-x: auto; }}
+    .red-cards {{ white-space: nowrap; margin-left: 5px; }}
+    .red-card {{
+        display: inline-block; width: 7px; height: 10px; margin-left: 2px;
+        background: {BAD_HEX}; border-radius: 1.5px; vertical-align: -1px;
+    }}
 
     .league-table td.stick0, .league-table th.stick0 {{
         position: sticky; left: 0; z-index: 2;
@@ -292,11 +297,28 @@ def team_row(teams: pd.DataFrame, name: str) -> dict:
 
 
 @st.cache_data(ttl=CACHE_TTL)
+def has_red_cards() -> bool:
+    """
+    Red cards (HRC / ARC) reach Supabase only once the results sync pushes
+    them. Until then the dashboard simply shows no card icons.
+    """
+    df = read_sql_df(
+        """
+        SELECT count(*) AS n FROM information_schema.columns
+        WHERE table_name = 'matchstats' AND column_name IN ('HRC', 'ARC')
+        """
+    )
+    return not df.empty and int(df["n"].iloc[0]) == 2
+
+
+@st.cache_data(ttl=CACHE_TTL)
 def load_matches(teams: tuple[str, ...], days: int) -> pd.DataFrame:
     """One query covering both teams, replacing the per-opponent N+1 loop."""
     since = (dt.datetime.now(TZ) - dt.timedelta(days=days)).date()
+    reds = (', "HRC" AS homereds, "ARC" AS awayreds'
+            if has_red_cards() else "")
     df = read_sql_df(
-        """
+        f"""
         SELECT "Date" AS date, "League" AS league,
                "HomeTeam" AS hometeam, "AwayTeam" AS awayteam,
                "HomeGoals" AS homegoals, "AwayGoals" AS awaygoals,
@@ -304,7 +326,7 @@ def load_matches(teams: tuple[str, ...], days: int) -> pd.DataFrame:
                "HomeShotsOn" AS homeshotson, "AwayShotsOn" AS awayshotson,
                "HomeAttacks" AS homeattacks, "AwayAttacks" AS awayattacks,
                "HomeDangerousAttacks" AS homedangerousattacks,
-               "AwayDangerousAttacks" AS awaydangerousattacks
+               "AwayDangerousAttacks" AS awaydangerousattacks{reds}
         FROM matchstats
         WHERE "Date" >= :since
           AND ("HomeTeam" = ANY(:teams) OR "AwayTeam" = ANY(:teams))
@@ -314,6 +336,9 @@ def load_matches(teams: tuple[str, ...], days: int) -> pd.DataFrame:
     )
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    for col in ("homereds", "awayreds"):
+        if col not in df:
+            df[col] = np.nan
     return df
 
 
@@ -382,6 +407,8 @@ def perspective(df: pd.DataFrame, team: str) -> pd.DataFrame:
     out["SOA"] = np.where(is_home, m["awayshotson"], m["homeshotson"])
     out["SF"] = np.where(is_home, m["homeshots"], m["awayshots"])
     out["SA"] = np.where(is_home, m["awayshots"], m["homeshots"])
+    out["RF"] = np.where(is_home, m["homereds"], m["awayreds"])
+    out["RA"] = np.where(is_home, m["awayreds"], m["homereds"])
     out["Venue"] = np.where(is_home, "H", "A")
     return out.sort_values("date", ascending=False)
 
@@ -397,7 +424,7 @@ def recent_form(matches: pd.DataFrame, team: str,
         teams["DEF"] if not teams.empty else {})
     df["When"] = df["date"].map(relative_day)
     return df[["Opponent", "Venue", "Opp ATT", "Opp DEF", "When",
-               "GF", "SOF", "SF", "GA", "SOA", "SA"]]
+               "GF", "SOF", "SF", "GA", "SOA", "SA", "RF", "RA"]]
 
 
 MUTUAL_WINDOWS = {
@@ -468,10 +495,24 @@ def mutual_opponents(matches: pd.DataFrame, home: str, away: str,
     out["A Diff"] = a_sof - a_soa
     out["Diff"] = out["H Diff"] - out["A Diff"]
 
-    out = out[["Opponent", "ATT", "DEF",
-               "H when", "H SOF", "H SOA", "H Diff",
-               "A when", "A SOF", "A SOA", "A Diff",
-               "Diff", "_sort"]]
+    # Red cards in each side's match against this opponent, each tagged with
+    # whose card it was: the side itself or the shared opponent.
+    out["H reds"] = [
+        " ".join(x for x in (tagged_reds(rf, "home", HOME, home),
+                             tagged_reds(ra, "opp", TEXT_2, opp)) if x)
+        for rf, ra, opp in zip(merged["RF_h"], merged["RA_h"], merged["Opponent"])]
+    out["A reds"] = [
+        " ".join(x for x in (tagged_reds(rf, "away", AWAY, away),
+                             tagged_reds(ra, "opp", TEXT_2, opp)) if x)
+        for rf, ra, opp in zip(merged["RF_a"], merged["RA_a"], merged["Opponent"])]
+
+    cols = ["Opponent", "ATT", "DEF",
+            "H when", "H SOF", "H SOA", "H Diff", "H reds",
+            "A when", "A SOF", "A SOA", "A Diff", "A reds",
+            "Diff", "_sort"]
+    if not (out["H reds"].astype(bool).any() or out["A reds"].astype(bool).any()):
+        cols = [c for c in cols if c not in ("H reds", "A reds")]
+    out = out[cols]
 
     return (out.sort_values("_sort", ascending=False)
                .drop(columns="_sort")
@@ -485,6 +526,33 @@ def head_to_head(matches_all: pd.DataFrame, home: str, away: str,
     mask = (((matches_all["hometeam"] == home) & (matches_all["awayteam"] == away))
             | ((matches_all["hometeam"] == away) & (matches_all["awayteam"] == home)))
     return matches_all[mask].sort_values("date", ascending=False).head(limit)
+
+
+def red_cards(n, team: str = "") -> str:
+    """
+    One small red card per sending-off, placed after the name of the team
+    that received it. Blank for none or for matches without card data.
+    """
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return ""
+    if n <= 0:
+        return ""
+    label = f"{team + ': ' if team else ''}{n} red card{'s' if n > 1 else ''}"
+    return (f'<span class="red-cards" title="{label}" aria-label="{label}">'
+            + '<span class="red-card"></span>' * n + "</span>")
+
+
+def tagged_reds(n, tag: str, colour: str, team: str) -> str:
+    """Red cards with a short label naming whose they were, for tables where
+    the card can't sit beside that team's name."""
+    icons = red_cards(n, team)
+    if not icons:
+        return ""
+    return (f'<span style="white-space:nowrap;">{icons}'
+            f'<span style="font-size:11px;color:{colour};margin-left:3px;">'
+            f"{tag}</span></span>")
 
 
 def relative_day(value) -> str:
@@ -798,12 +866,19 @@ def h2h_chart(row: dict, fixture_home: str, fixture_away: str):
     # paper coordinates rather than data coordinates so the y-axis is left
     # exactly as the other charts have it — an explicit numeric range on a
     # categorical axis can drop bars entirely.
+    def cards(key):
+        try:
+            n = int(row.get(key))
+        except (TypeError, ValueError):
+            return ""
+        return (" " + f'<span style="color:{BAD_HEX}">▮</span>' * n) if n > 0 else ""
+
     fig.add_annotation(x=0, y=1.0, xref="paper", yref="paper",
-                       text=f"{past_home} (H)", showarrow=False,
+                       text=f"{past_home} (H){cards('homereds')}", showarrow=False,
                        xanchor="left", yanchor="bottom",
                        font=dict(color=left_colour, size=12))
     fig.add_annotation(x=1, y=1.0, xref="paper", yref="paper",
-                       text=f"{past_away} (A)", showarrow=False,
+                       text=f"{past_away} (A){cards('awayreds')}", showarrow=False,
                        xanchor="right", yanchor="bottom",
                        font=dict(color=right_colour, size=12))
 
@@ -1418,7 +1493,13 @@ with tab_form:
         if form.empty:
             st.caption("No recent matches found.")
             continue
-        render_table(form, base, POSITIVE, NEGATIVE, formats)
+        shown = form.drop(columns=["RF", "RA"])
+        shown["Opponent"] = [f"{o}{red_cards(n, o)}"
+                             for o, n in zip(form["Opponent"], form["RA"])]
+        own = [tagged_reds(n, "own", color, team) for n in form["RF"]]
+        if any(own):
+            shown.insert(2, "Own reds", own)
+        render_table(shown, base, POSITIVE, NEGATIVE, formats)
         trend = form_trend(form, team, base, colour=color)
         if trend:
             st.plotly_chart(trend, use_container_width=True,
@@ -1450,9 +1531,11 @@ with tab_h2h:
 
             hist = pd.DataFrame({
                 "When": h2h["date"].map(relative_day),
-                "Home": h2h["hometeam"],
+                "Home": [f"{t}{red_cards(n, t)}"
+                         for t, n in zip(h2h["hometeam"], h2h["homereds"])],
                 "Score": score("homegoals", "awaygoals"),
-                "Away": h2h["awayteam"],
+                "Away": [f"{t}{red_cards(n, t)}"
+                         for t, n in zip(h2h["awayteam"], h2h["awayreds"])],
                 "SoT": score("homeshotson", "awayshotson"),
             })
             render_table(hist, {}, [], [])
