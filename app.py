@@ -1224,19 +1224,27 @@ def render_edge(row, home_team, away_team):
         (away_team, row.get("awaywin"), row.get("awayodds"), AWAY),
     ]
 
-    parts, foot = [], []
-    total = sum(float(o[1]) for o in outcomes
-                if o[1] is not None and pd.notna(o[1])) or 100.0
+    shown = [(label, float(model), odds, color) for label, model, odds, color in outcomes
+             if model is not None and pd.notna(model)]
+    total = sum(m for _, m, _, _ in shown) or 100.0
 
-    for label, model, odds, color in outcomes:
-        if model is None or pd.isna(model):
-            continue
-        model = float(model)
-        width = model / total * 100
+    # Width follows probability, but every outcome keeps room for its label and
+    # its odds/edge line: a near-0% segment otherwise spilled its text and
+    # squeezed the line below into a one-character column.
+    MIN_SHARE = 12.0
+    raw = [max(m / total * 100, 0.0) for _, m, _, _ in shown]
+    small = [r < MIN_SHARE for r in raw]
+    spare = 100.0 - MIN_SHARE * sum(small)
+    big_total = sum(r for r, sm in zip(raw, small) if not sm) or 1.0
+    widths = [MIN_SHARE if sm else r / big_total * spare for r, sm in zip(raw, small)]
+
+    cell = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+    parts, foot = [], []
+    for (label, model, odds, color), width in zip(shown, widths):
         fg = PAGE_BG if color != DRAW else "#C9D1DE"
         parts.append(
-            f'<div style="width:{width:.1f}%;background:{color};display:flex;'
-            f"align-items:center;justify-content:center;font-size:12px;"
+            f'<div title="{label}: model {model:.1f}%" style="width:{width:.1f}%;background:{color};'
+            f"display:flex;align-items:center;justify-content:center;font-size:12px;{cell}"
             f'color:{fg};">{model:.0f}%</div>'
         )
 
@@ -1245,7 +1253,7 @@ def render_edge(row, home_team, away_team):
             edge = model - implied
             ec = GOOD_HEX if edge > 0 else BAD_HEX
             foot.append(
-                f'<div style="width:{width:.1f}%;text-align:center;font-size:12px;'
+                f'<div style="width:{width:.1f}%;text-align:center;font-size:12px;{cell}'
                 f'color:{TEXT_2};">{float(odds):.2f} · '
                 f'<span style="color:{ec};">{edge:+.1f}</span></div>'
             )
