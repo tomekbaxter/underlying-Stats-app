@@ -9,6 +9,8 @@ import plotly.graph_objects as go
 import streamlit as st
 from sqlalchemy import create_engine, text
 
+import travel
+
 # ============================================================
 # DESIGN TOKENS
 # ============================================================
@@ -383,6 +385,25 @@ def league_baselines(league_name: str) -> dict:
         "Opp ATT": float(att.mean()) if not att.empty else 0.0,
         "Opp DEF": float(deff.mean()) if not deff.empty else 0.0,
     }
+
+
+@st.cache_data(ttl=CACHE_TTL)
+def load_context(eventid) -> dict | None:
+    """
+    Saved Travel & Conditions research for a fixture (newest complete version),
+    or None when it hasn't been researched or the research table doesn't exist.
+    Quiet on purpose: a missing table must never put a warning on every fixture.
+    """
+    try:
+        with ENGINE.connect() as conn:
+            row = conn.execute(
+                text("SELECT report FROM fixture_context WHERE eventid = :e "
+                     "AND status = 'complete' ORDER BY version DESC LIMIT 1"),
+                {"e": int(eventid)},
+            ).first()
+    except Exception:
+        return None
+    return row[0] if row else None
 
 
 # ============================================================
@@ -1423,9 +1444,13 @@ render_header(row, home_team, away_team, home_stats, away_stats,
 render_edge(row, home_team, away_team)
 render_help()
 
-tab_cmp, tab_mutual, tab_form, tab_h2h, tab_league = st.tabs(
+context = load_context(ev)
+if context:
+    st.markdown(travel.travel_badge(context), unsafe_allow_html=True)
+
+tab_cmp, tab_mutual, tab_form, tab_h2h, tab_league, tab_travel = st.tabs(
     ["Comparison", "Mutual opponents", "Recent form", "Head to head",
-     "League table"]
+     "League table", "Travel & Conditions"]
 )
 
 POSITIVE = ["GF", "SOF", "SF", "Opp ATT", "ATT", "H SOF", "A SOF"]
@@ -1568,6 +1593,13 @@ with tab_league:
                 st.caption("Ranked by points per game.")
         if not shown.empty:
             render_league_table(shown.reset_index(drop=True), base, home_team, away_team)
+
+with tab_travel:
+    travel.render(context, {
+        "PAGE_BG": PAGE_BG, "SURFACE_1": SURFACE_1, "SURFACE_2": SURFACE_2,
+        "SURFACE_3": SURFACE_3, "BORDER": BORDER, "TEXT_1": TEXT_1,
+        "TEXT_2": TEXT_2, "TEXT_3": TEXT_3, "HOME": HOME, "AWAY": AWAY,
+    })
 
 st.divider()
 if st.button("Refresh data"):
