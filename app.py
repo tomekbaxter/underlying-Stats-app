@@ -495,23 +495,15 @@ def mutual_opponents(matches: pd.DataFrame, home: str, away: str,
     out["A Diff"] = a_sof - a_soa
     out["Diff"] = out["H Diff"] - out["A Diff"]
 
-    # Red cards in each side's match against this opponent, each tagged with
-    # whose card it was: the side itself or the shared opponent.
-    out["H reds"] = [
-        " ".join(x for x in (tagged_reds(rf, "home", HOME, home),
-                             tagged_reds(ra, "opp", TEXT_2, opp)) if x)
-        for rf, ra, opp in zip(merged["RF_h"], merged["RA_h"], merged["Opponent"])]
-    out["A reds"] = [
-        " ".join(x for x in (tagged_reds(rf, "away", AWAY, away),
-                             tagged_reds(ra, "opp", TEXT_2, opp)) if x)
-        for rf, ra, opp in zip(merged["RF_a"], merged["RA_a"], merged["Opponent"])]
+    # Red cards in each side's game against this opponent, from that side's
+    # point of view: "1-2", "For", "Opp x2".
+    out["H reds"] = [reds_score(f, a) for f, a in zip(merged["RF_h"], merged["RA_h"])]
+    out["A reds"] = [reds_score(f, a) for f, a in zip(merged["RF_a"], merged["RA_a"])]
 
     cols = ["Opponent", "ATT", "DEF",
             "H when", "H SOF", "H SOA", "H Diff", "H reds",
             "A when", "A SOF", "A SOA", "A Diff", "A reds",
             "Diff", "_sort"]
-    if not (out["H reds"].astype(bool).any() or out["A reds"].astype(bool).any()):
-        cols = [c for c in cols if c not in ("H reds", "A reds")]
     out = out[cols]
 
     return (out.sort_values("_sort", ascending=False)
@@ -544,15 +536,32 @@ def red_cards(n, team: str = "") -> str:
             + '<span class="red-card"></span>' * n + "</span>")
 
 
-def tagged_reds(n, tag: str, colour: str, team: str) -> str:
-    """Red cards with a short label naming whose they were, for tables where
-    the card can't sit beside that team's name."""
-    icons = red_cards(n, team)
-    if not icons:
+def reds_score(own, opp) -> str:
+    """
+    Red cards in one match from a team's side: "1-2" when both sides had
+    one (team first), "For" / "For x2" or "Opp" / "Opp x2" when only one
+    side did, blank when neither, "—" when the match has no card data.
+    """
+    def count(v):
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return None
+
+    f, a = count(own), count(opp)
+    if f is None and a is None:
+        return "—"
+    f, a = f or 0, a or 0
+    if f and a:
+        text = f"{f}-{a}"
+    elif f:
+        text = "For" + (f" x{f}" if f > 1 else "")
+    elif a:
+        text = "Opp" + (f" x{a}" if a > 1 else "")
+    else:
         return ""
-    return (f'<span style="white-space:nowrap;">{icons}'
-            f'<span style="font-size:11px;color:{colour};margin-left:3px;">'
-            f"{tag}</span></span>")
+    return (f'<span style="white-space:nowrap;color:{TEXT_1};">'
+            f'<span class="red-card" style="margin:0 5px 0 0;"></span>{text}</span>')
 
 
 def relative_day(value) -> str:
@@ -1494,11 +1503,8 @@ with tab_form:
             st.caption("No recent matches found.")
             continue
         shown = form.drop(columns=["RF", "RA"])
-        shown["Opponent"] = [f"{o}{red_cards(n, o)}"
-                             for o, n in zip(form["Opponent"], form["RA"])]
-        own = [tagged_reds(n, "own", color, team) for n in form["RF"]]
-        if any(own):
-            shown.insert(2, "Own reds", own)
+        shown.insert(2, "Reds", [reds_score(f, a)
+                                 for f, a in zip(form["RF"], form["RA"])])
         render_table(shown, base, POSITIVE, NEGATIVE, formats)
         trend = form_trend(form, team, base, colour=color)
         if trend:
