@@ -314,11 +314,25 @@ def has_red_cards() -> bool:
 
 
 @st.cache_data(ttl=CACHE_TTL)
+def has_red_minutes() -> bool:
+    """Red card minutes (HRCMIN / ARCMIN) once they exist in Supabase."""
+    df = read_sql_df(
+        """
+        SELECT count(*) AS n FROM information_schema.columns
+        WHERE table_name = 'matchstats' AND column_name IN ('HRCMIN', 'ARCMIN')
+        """
+    )
+    return not df.empty and int(df["n"].iloc[0]) == 2
+
+
+@st.cache_data(ttl=CACHE_TTL)
 def load_matches(teams: tuple[str, ...], days: int) -> pd.DataFrame:
     """One query covering both teams, replacing the per-opponent N+1 loop."""
     since = (dt.datetime.now(TZ) - dt.timedelta(days=days)).date()
     reds = (', "HRC" AS homereds, "ARC" AS awayreds'
             if has_red_cards() else "")
+    if reds and has_red_minutes():
+        reds += ', "HRCMIN" AS homeredmins, "ARCMIN" AS awayredmins'
     df = read_sql_df(
         f"""
         SELECT "Date" AS date, "League" AS league,
@@ -338,7 +352,7 @@ def load_matches(teams: tuple[str, ...], days: int) -> pd.DataFrame:
     )
     if not df.empty:
         df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    for col in ("homereds", "awayreds"):
+    for col in ("homereds", "awayreds", "homeredmins", "awayredmins"):
         if col not in df:
             df[col] = np.nan
     return df
@@ -430,6 +444,8 @@ def perspective(df: pd.DataFrame, team: str) -> pd.DataFrame:
     out["SA"] = np.where(is_home, m["awayshots"], m["homeshots"])
     out["RF"] = np.where(is_home, m["homereds"], m["awayreds"])
     out["RA"] = np.where(is_home, m["awayreds"], m["homereds"])
+    out["RMF"] = np.where(is_home, m["homeredmins"], m["awayredmins"])
+    out["RMA"] = np.where(is_home, m["awayredmins"], m["homeredmins"])
     out["Venue"] = np.where(is_home, "H", "A")
     return out.sort_values("date", ascending=False)
 
@@ -445,7 +461,7 @@ def recent_form(matches: pd.DataFrame, team: str,
         teams["DEF"] if not teams.empty else {})
     df["When"] = df["date"].map(relative_day)
     return df[["Opponent", "Venue", "Opp ATT", "Opp DEF", "When",
-               "GF", "SOF", "SF", "GA", "SOA", "SA", "RF", "RA"]]
+               "GF", "SOF", "SF", "GA", "SOA", "SA", "RF", "RA", "RMF", "RMA"]]
 
 
 MUTUAL_WINDOWS = {
@@ -557,11 +573,19 @@ def red_cards(n, team: str = "") -> str:
             + '<span class="red-card"></span>' * n + "</span>")
 
 
-def reds_score(own, opp) -> str:
+def red_minutes(value) -> str:
+    """Stored minutes '67,90+3' -> "67', 90+3'"; '?' (unknown) and blanks are left out."""
+    if not isinstance(value, str):
+        return ""
+    return ", ".join(f"{m}'" for m in value.split(",") if m.strip() and m.strip() != "?")
+
+
+def reds_score(own, opp, own_mins=None, opp_mins=None) -> str:
     """
     Red cards in one match from a team's side: "1-2" when both sides had
     one (team first), "For" / "For x2" or "Opp" / "Opp x2" when only one
     side did, blank when neither, "—" when the match has no card data.
+    The minutes follow when known: "For 34'", "1-2 12' / 55', 80'".
     """
     def count(v):
         try:
@@ -573,14 +597,20 @@ def reds_score(own, opp) -> str:
     if f is None and a is None:
         return "—"
     f, a = f or 0, a or 0
+    fm, am = red_minutes(own_mins), red_minutes(opp_mins)
     if f and a:
         text = f"{f}-{a}"
+        mins = f"{fm or '?'} / {am or '?'}" if fm or am else ""
     elif f:
         text = "For" + (f" x{f}" if f > 1 else "")
+        mins = fm
     elif a:
         text = "Opp" + (f" x{a}" if a > 1 else "")
+        mins = am
     else:
         return ""
+    if mins:
+        text += f' <span style="color:{TEXT_3};">{mins}</span>'
     return (f'<span style="white-space:nowrap;color:{TEXT_1};">'
             f'<span class="red-card" style="margin:0 5px 0 0;"></span>{text}</span>')
 
@@ -1535,9 +1565,10 @@ with tab_form:
         if form.empty:
             st.caption("No recent matches found.")
             continue
-        shown = form.drop(columns=["RF", "RA"])
-        shown.insert(2, "Reds", [reds_score(f, a)
-                                 for f, a in zip(form["RF"], form["RA"])])
+        shown = form.drop(columns=["RF", "RA", "RMF", "RMA"])
+        shown.insert(2, "Reds", [reds_score(f, a, fm, am)
+                                 for f, a, fm, am in zip(form["RF"], form["RA"],
+                                                         form["RMF"], form["RMA"])])
         render_table(shown, base, POSITIVE, NEGATIVE, formats)
         trend = form_trend(form, team, base, colour=color)
         if trend:
