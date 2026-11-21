@@ -49,8 +49,15 @@ def _hours(t):
     return f"≈{t['practical_hours']:g} h" if t.get("practical_hours") else "—"
 
 
+def _known(ctx) -> bool:
+    """False for a partial record whose club bases could not both be placed (no distance)."""
+    return ctx["travel"].get("straight_km") is not None
+
+
 def travel_badge(ctx) -> str:
     t, level = ctx["travel"], ctx["impact"]["travel"]
+    if not _known(ctx):
+        return _pill("Travel unknown", "#93A0B8", "A club base could not be placed, so the trip isn't worked out")
     dist = f"{t['road_km']} km" if t.get("road_km") else f"{t['straight_km']} km direct"
     tip = (f"{ctx['away']['city'] or ctx['away']['team_name']} → {ctx['venue']['city'] or '?'} · {dist} · "
            f"{t['likely_transport']} {_hours(t)} · travel impact {level}")
@@ -72,15 +79,18 @@ def _metric(label, value, sub="", colour=None):
 def _summary(ctx, c):
     t, w, imp = ctx["travel"], ctx.get("weather") or {}, ctx["impact"]
     alt, tz = t.get("altitude_diff_m"), t.get("timezone_diff_h")
+    known = _known(ctx)
     cells = [
-        _metric("Away travel", f"{t['road_km']} km" if t.get("road_km") else f"{t['straight_km']} km",
+        _metric("Away travel", "—" if not known else f"{t['road_km']} km" if t.get("road_km") else f"{t['straight_km']} km",
+                "club base not found" if not known else
                 f"{t['straight_km']} km direct" if t.get("road_km") else "direct, no road route"),
-        _metric("Journey", _hours(t), t["likely_transport"]),
+        _metric("Journey", _hours(t), t.get("likely_transport") or ""),
         _metric("Temperature", f"{_num(w.get('temp_c'))}°C" if w else "—",
-                f"feels {_num(w.get('feels_c'))}°C" if w else "no forecast yet"),
+                f"feels {_num(w.get('feels_c'))}°C" if w else
+                "venue unknown" if ctx["venue"].get("lat") is None else "no forecast yet"),
         _metric("Altitude change", "—" if alt is None else f"{alt:+,} m", "venue v away base"),
         _metric("Timezone", "—" if tz is None else f"{tz:+g} h", "same zone" if tz == 0 else ""),
-        _metric("Overall impact", imp["overall"], f"travel {imp['travel'].lower()}",
+        _metric("Overall impact", imp["overall"], f"travel {(imp['travel'] or 'unknown').lower()}",
                 IMPACT_COLOURS.get(imp["overall"])),
     ]
     st.markdown(
@@ -119,8 +129,30 @@ def _map(ctx, c):
     return fig
 
 
+def _bases_card(ctx, c):
+    """In place of the map when a club base could not be placed."""
+    rows = []
+    for side, colour in (("home", c["HOME"]), ("away", c["AWAY"])):
+        club = ctx[side]
+        where = (club.get("city") or "not found") if club.get("lat") is not None else "not found"
+        rows.append(f'<div><span style="color:{colour};">{club["team_name"]}</span>: {where}'
+                    f'<span style="color:{c["TEXT_3"]};"> ({(club.get("located_by") or "no location").lower()})'
+                    f'</span></div>')
+    st.markdown(
+        f'<div style="background:{c["SURFACE_1"]};border:1px solid {c["BORDER"]};border-radius:14px;'
+        f'padding:16px 18px;font-size:13px;color:{c["TEXT_2"]};line-height:1.7;">'
+        f'<div style="display:flex;justify-content:space-between;gap:8px;margin-bottom:6px;">'
+        f'<b style="color:{c["TEXT_1"]};">Club bases</b>{travel_badge(ctx)}</div>{"".join(rows)}'
+        f'<div style="color:{c["TEXT_3"]};font-size:12px;margin-top:6px;">Travel needs both clubs placed '
+        f'more precisely than a whole country or state, so distance and journey are left blank.</div></div>',
+        unsafe_allow_html=True)
+
+
 def _travel_card(ctx, c):
     t, h, a, v = ctx["travel"], ctx["home"], ctx["away"], ctx["venue"]
+    if not _known(ctx):
+        _bases_card(ctx, c)
+        return
     st.markdown(
         f'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;gap:8px;">'
         f'<div style="font-size:14px;color:{c["TEXT_1"]};"><span style="color:{c["AWAY"]};">'
@@ -144,13 +176,17 @@ def _travel_card(ctx, c):
 def _weather_card(ctx, c):
     w = ctx.get("weather")
     if not w:
+        why = ("the home club's base wasn't found, so there's no venue to forecast"
+               if ctx["venue"].get("lat") is None else
+               "no forecast for kick-off yet (the forecast reaches about two weeks ahead)")
         st.markdown(
             f'<div style="background:{c["SURFACE_1"]};border:1px solid {c["BORDER"]};border-radius:14px;'
-            f'padding:16px 18px;font-size:13px;color:{c["TEXT_2"]};">No forecast for kick-off yet '
-            f'(the forecast reaches about two weeks ahead).</div>', unsafe_allow_html=True)
+            f'padding:16px 18px;font-size:13px;color:{c["TEXT_2"]};">Kick-off {ctx["kickoff"]["uk"][11:]} UK'
+            + (f' · {ctx["kickoff"]["local"][11:]} local' if ctx["kickoff"].get("local") else "")
+            + f'<br><span style="color:{c["TEXT_3"]};">Weather: {why}.</span></div>', unsafe_allow_html=True)
         return
     icon, words = _weather(w["code"])
-    local = ctx["kickoff"]["local"]
+    local = ctx["kickoff"].get("local") or ctx["kickoff"]["uk"]
     day = "Daytime" if w["is_day"] else "Night"
     temps = [p["temp"] for p in w["timeline"] if p["temp"] is not None] or [w["temp_c"]]
     lo, hi = min(temps) - 1, max(temps) + 1
@@ -201,4 +237,6 @@ def render(ctx, c):
         _travel_card(ctx, c)
     with right:
         _weather_card(ctx, c)
-    st.caption(f"Researched {ctx['researched_at'][:16].replace('T', ' ')} UTC · confidence {ctx['confidence'].lower()}")
+    gaps = f" · partial: {', '.join(ctx['partial'])}" if ctx.get("partial") else ""
+    st.caption(f"Researched {ctx['researched_at'][:16].replace('T', ' ')} UTC · "
+               f"confidence {ctx['confidence'].lower()}{gaps}")
